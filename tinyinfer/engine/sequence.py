@@ -24,13 +24,22 @@ class Sequence:
 
         # token_ids 始终保存：prompt tokens + 已生成 tokens
         self.token_ids = list(token_ids)
-        self.num_prompt_tokens = len(token_ids)
+        self.num_prompt_tokens = len(token_ids) # 创建Sequence对象时已经确定, 后续token_ids可能在逐渐变长但num_prompts_tokens不会再改变
 
         # KV / 调度相关状态
-        self.num_cached_tokens = 0       # 已经存在有效 KV Cache 的 token 数
-        self.num_scheduled_tokens = 0    # 本轮 Scheduler 准备计算的 token 数; 和后续 chunked prefill 配合
+        self.num_cached_tokens = 0       # 已经存在 KV cache、无需本轮重新计算的 prefix token 数
+        self.num_scheduled_tokens = 0    # scheduler 决定本轮要真正送进模型的 token 数; 和后续 chunked prefill 配合
         self.is_prefill = True           # True: prefill；False: decode
         self.block_table: list[int] = [] # logical KV block -> physical block id
+
+    @property
+    def num_uncached_tokens(self) -> int:
+        return self.num_tokens - self.num_cached_tokens
+
+    def mark_scheduled(self, n: int):
+        if n <= 0:
+            raise ValueError("scheduled token count must be positive")
+        self.num_scheduled_tokens = n
 
     @property
     def last_token(self) -> int:
@@ -38,7 +47,7 @@ class Sequence:
         return self.token_ids[-1]
 
     @property
-    def num_tokens(self) -> int:
+    def num_tokens(self) -> int: # 有property修饰的成员函数可以直接像访问成员变量一样访问
         """当前总 token 数 = prompt + completion。"""
         return len(self.token_ids)
 
@@ -56,11 +65,18 @@ class Sequence:
         """把模型新生成的 token 追加到当前 Sequence。"""
         self.token_ids.append(int(token_id))
 
-    def should_stop(self, eos_token_id: int) -> bool:
-        """达到 max_tokens，或生成 EOS 时停止。"""
+    def should_stop(self, eos_token_id: int, max_model_len: int) -> bool:
+        """达到 completion 上限、模型上下文上限，或生成 EOS 时停止。"""
+        # case1: 用户指定的最大生成长度
         if self.num_completion_tokens >= self.sampling_params.max_tokens:
             return True
 
+        # case2: 模型允许的最大总上下文长度：
+        # prompt tokens + completion tokens
+        if self.num_tokens >= max_model_len:
+            return True
+
+        # case3: 遇到 EOS
         if (
             not self.sampling_params.ignore_eos
             and eos_token_id >= 0
