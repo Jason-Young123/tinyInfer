@@ -57,7 +57,6 @@ class Scheduler:
         # 返回一个普通 list，避免 ModelRunner 直接修改 Scheduler 内部 deque。
         return list(self.running), is_prefill
 
-
     # 优先prefill, 其次decode, 且一个batch里面仅有prefill或者decode
     def schedule(self) -> tuple[list[Sequence], bool]:
         if trace_enabled("TINYINFER_TRACE_SCHED"):

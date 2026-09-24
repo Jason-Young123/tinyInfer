@@ -1,0 +1,173 @@
+from collections import deque
+import xxhash
+
+from tinyinfer.engine.sequence import Sequence
+
+# 当前仅实现“正在被其他活跃 Sequence 持有时可共享的 Prefix KV”, 而不是“请求结束后依然可以保留、按 LRU 等策略等待未来复用的 Prefix Cache”
+# 后续待改进: 1. 真正把物理block作为cache形式, 引入替换策略, 而不是某个请求推理结束直接release
+#            2. 加入automatic prefix caching逻辑
+
+# 注意block_manager仅管理block的metadata, 不涉及KV cache实际数据
+class Block:
+    def __init__(self, block_id: int):
+        self.block_id = block_id         # 物理 KV block 编号
+        self.ref_count = 0               # 当前有多少 Sequence 引用该 block
+        self.hash: int | None = None     # 完整 token block 的哈希，用于 Prefix Cache 查找
+        self.token_ids: tuple[int, ...] = ()  # 该 block 对应的 token ids，仅作 metadata/哈希校验
+
+    def bind(self, token_ids: list[int], block_hash: int | None):
+        self.token_ids = tuple(token_ids) # 记录此物理 block 当前代表哪些 token
+        self.hash = block_hash            # 绑定其 prefix-cache, 便于后续查找
+
+    def reset(self):
+        self.ref_count = 0                # 无 Sequence 引用
+        self.hash = None                  # 清除旧 prefix-cache 身份
+        self.token_ids = ()               # 清除旧 token metadata
+
+
+
+# 所有Block的管理池
+class BlockManager:
+    def __init__(self, num_blocks: int, block_size: int): # 一共存在多少个物理block, 每个物理block有多大(逻辑大小, 即存放多少token对应的KV)
+        if num_blocks <= 0:
+            raise ValueError("num_blocks must be positive")
+        self.block_size = block_size
+        self.blocks = [Block(i) for i in range(num_blocks)] # 所有 physical KV block 的 metadata；block_id = 0...num_blocks-1
+        self.free_ids = deque(range(num_blocks)) # 当前空闲 physical block id列表，allocate 从这里取，free 后再放回来
+        self.hash_to_block_id: dict[int, int] = {} # Prefix Cache 索引：block hash -> physical block id, 即每个物理block都有唯一的hash值
+
+    @property
+    def num_free_blocks(self) -> int: # 还有多少剩余可分配的物理block
+        return len(self.free_ids)
+
+    def _take_free_block(self) -> Block: # 从free_ids列表中新分配一个block
+        if not self.free_ids:
+            raise RuntimeError("KV cache exhausted")  # 没有可用物理 block
+        block_id = self.free_ids.popleft()            # FIFO 取一个空闲 block id
+        block = self.blocks[block_id]                 # 找到对应 Block metadata
+        if block.ref_count != 0:
+            raise RuntimeError("free-list corruption")# free list 中的 block 理应无人引用
+        block.ref_count = 1                           # 新 Sequence 成为第一个引用者
+        return block
+
+    ## 这里可能发生hash collide, 但实际上不会错误reset block;
+    ##   比如block7和block11发生了hash collide, 且hash_to_block_id中Hash_Collided指向的是block7;
+    ##   那么假设block7所对应的推理请求先结束, 那么其会调用_release_block(7), 删除HC -> block7这条记录并把block7 reset, 但不会动block11;
+    ##   假设block11对应的请求先结束, 那么其会调用_release_block(11), 删除HC -> block7并把block11 reset, 但不会动block7;
+    ##   也就是说, _release_block可能错误删除了字典中的HC->blocki的信息但不会影响正在推理中的请求, 只不过当新请求进来时, 可能影响其prefix cache的命中率
+    def _release_block(self, block_id: int): # _take_free_block的逆操作, 将指定编号的物理block减少一次引用, 并做可能的回收
+        block = self.blocks[block_id]                  # 找到待释放 block
+        if block.ref_count <= 0:
+            raise RuntimeError("block refcount underflow")  # 防止重复释放
+        block.ref_count -= 1                           # 当前 Sequence 放弃引用
+        if block.ref_count == 0:
+            # 改进: 只有全局 Prefix Cache 索引确实指向当前 block, 才能删除 hash -> block_id 映射。
+            if (
+                block.hash is not None
+                and self.hash_to_block_id.get(block.hash) == block_id
+            ):
+                self.hash_to_block_id.pop(block.hash)
+            block.reset()
+            self.free_ids.append(block_id)
+
+    def can_allocate(self, seq: Sequence) -> bool:
+        need = seq.num_blocks - len(seq.block_table) # 还需分配的block数目
+        return need <= self.num_free_blocks
+
+    ### allocate和free都是针对完整sequence进行多block分配(prefill阶段)与释放
+    # 调用_take_free_block进行分配
+    def allocate(self, seq: Sequence): # 为某个sequence分配新的物理block(可以分配多个)
+        need = seq.num_blocks - len(seq.block_table)
+        if need < 0:
+            raise RuntimeError("sequence has more physical blocks than logical blocks")
+        if need > self.num_free_blocks:
+            raise RuntimeError("not enough KV blocks")
+        for _ in range(need):
+            block = self._take_free_block()
+            seq.block_table.append(block.block_id)
+
+    # 调用_release_block进行释放
+    def free(self, seq: Sequence): # 对于某个sequence分配的所有物理block进行占用释放(可以释放多个)
+        for block_id in seq.block_table:
+            self._release_block(block_id)
+        seq.block_table.clear()
+
+    ### append则是针对请求推理过程中追加分配物理block
+    def can_append(self, seq: Sequence) -> bool:
+        needed_blocks = seq.num_blocks - len(seq.block_table)
+        return needed_blocks <= self.num_free_blocks
+
+    def may_append(self, seq: Sequence):
+        needed_blocks = seq.num_blocks - len(seq.block_table)
+        for _ in range(max(0, needed_blocks)):
+            block = self._take_free_block()
+            seq.block_table.append(block.block_id)
+
+    
+
+    # 关键的分配hash逻辑
+    @staticmethod
+    def _hash_block(prev_hash: int, token_ids: list[int]) -> int: # 基于前序block和当前block内的token生成综合后的hash值
+        h = xxhash.xxh64()
+        h.update(prev_hash.to_bytes(8, "little", signed=False)) # 先融入前序block
+        for token in token_ids: # 然后遍历当前block内的token, 逐步迭代hash值
+            h.update(int(token).to_bytes(8, "little", signed=True))
+        return h.intdigest()
+
+    ## 这个函数内部发生hash collide的情况: 
+    ##   某个block找到了匹配的hash->block_id记录, 
+    ##   但实际上发生了 hash(prefixA + [1,2,3,4]) == hash(prefixB + [1,2,3,4])的极小概率事件;
+    ##   此时理论上这个命中的block不完全匹配, 不应该使用, 但此处除非逐次比较所有前序hash(tokens to be exactly)否则根本无法判断发生了collide;
+    ##   鉴于判断复杂程度和自身的极小概率性, 此处就忽略这种collide;
+    ##   产生的后果是: 实际不匹配的KV cache误认为匹配, 导致这个请求的上下文出错、回复有问题 
+    # 用于判断当前seq到底有多少token/逻辑block已经作为prefix cache存在于物理block中, 并返回最后一个命中的prefix cache的hash值
+    def find_cached_prefix(self, seq: Sequence) -> tuple[list[int], int]:
+        cached_ids = []
+        prev_hash = 0 # 第一个逻辑block没有前序block, 因此hash值为0
+        num_cached_tokens = 0
+        full_blocks = seq.num_tokens // self.block_size # 这个sequence具有多少个完整的block(因为prefix cache只cache完整block)
+
+        for logical_idx in range(full_blocks): 
+            token_ids = seq.block_token_ids(logical_idx) # 基于该seq内的逻辑block idx找到token_ids列表
+            block_hash = self._hash_block(prev_hash, token_ids) # 确定当前block的最终hash值
+            block_id = self.hash_to_block_id.get(block_hash) # 去已经被分配的物理block中去寻找是否有匹配的hash值
+            if block_id is None: # 匹配失败, 直接停止, 因为后续必然会失败
+                break
+            block = self.blocks[block_id] # 成功匹配到了物理block
+            if block.token_ids != tuple(token_ids): # 再次确认目标物理block内部token是否和当前逻辑block内token相同
+                break
+            # 确定匹配成功
+            block.ref_count += 1
+            cached_ids.append(block_id)
+            num_cached_tokens += self.block_size
+            prev_hash = block_hash # 更新prev_hash
+
+        return cached_ids, num_cached_tokens, prev_hash
+
+
+    # 这个函数同样可能发生hash collide, 发生在新分配block的过程中:
+    ##   该新分配block产生的hash和某个已分配block的hash值相同; 此时该请求会错误地使用其他请求或自身的历史KV cache
+    def allocate_with_prefix_cache(self, seq: Sequence):
+        if seq.block_table:
+            raise RuntimeError("sequence already allocated")
+
+        cached_ids, cached_tokens, prev_hash = self.find_cached_prefix(seq)
+        seq.block_table.extend(cached_ids) # 将命中prefix cache的块注册到block_table中, 后续无需再分配
+        seq.num_cached_tokens = cached_tokens
+
+        self.allocate(seq) # 为后面未命中prefix cache的部分再进行分配
+        
+        # 只处理第一个 cache miss 之后的新 block
+        start_idx = len(cached_ids)
+
+        for logical_idx in range(start_idx, len(seq.block_table)):
+            block_id = seq.block_table[logical_idx]
+            token_ids = seq.block_token_ids(logical_idx)
+            # Prefix Cache 只注册完整 block
+            if len(token_ids) != self.block_size:
+                break
+            block_hash = self._hash_block(prev_hash, token_ids)     # 分配该block的hash
+            block = self.blocks[block_id]                           # 分配block
+            block.bind(token_ids, block_hash)                       # 为该block绑定token和hash信息
+            self.hash_to_block_id.setdefault(block_hash, block_id)  # 更新hash_to_block_id这个dict, 如果hash已经存在则跳过更新
+            prev_hash = block_hash

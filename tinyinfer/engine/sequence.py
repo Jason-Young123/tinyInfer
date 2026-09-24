@@ -12,7 +12,7 @@ class SequenceStatus(Enum):
 
 class Sequence:
     counter = count()   # 给每个 Sequence 分配全局递增 seq_id
-    block_size = 256    # 一个 KV block 可容纳的 token 数
+    block_size = 256    # 一个 KV block 可容纳的 token 数; 注意这里的block_size为逻辑大小(token数目)而非物理大小(Byte)
 
     def __init__(self, token_ids: list[int], sampling_params: SamplingParams):
         if not token_ids:
@@ -31,6 +31,22 @@ class Sequence:
         self.num_scheduled_tokens = 0    # scheduler 决定本轮要真正送进模型的 token 数; 和后续 chunked prefill 配合
         self.is_prefill = True           # True: prefill；False: decode
         self.block_table: list[int] = [] # logical KV block -> physical block id
+    
+    @property
+    def num_blocks(self) -> int: # 对于当前的length需要多少个物理block
+        n = self.num_tokens
+        return (n + self.block_size - 1) // self.block_size
+    
+    @property
+    def last_block_num_tokens(self) -> int:
+        rem = self.num_tokens % self.block_size
+        return rem if rem else self.block_size
+
+    # logic_block_id -> 该逻辑block内所有token
+    def block_token_ids(self, logical_idx: int) -> list[int]:
+        begin = logical_idx * self.block_size
+        end = min(begin + self.block_size, self.num_tokens)
+        return self.token_ids[begin:end]
 
     @property
     def num_uncached_tokens(self) -> int:
