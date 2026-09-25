@@ -27,10 +27,11 @@ class Sequence:
         self.num_prompt_tokens = len(token_ids) # 创建Sequence对象时已经确定, 后续token_ids可能在逐渐变长但num_prompts_tokens不会再改变
 
         # KV / 调度相关状态
-        self.num_cached_tokens = 0       # 已经存在 KV cache、无需本轮重新计算的 prefix token 数
+        self.num_prefix_cached_tokens = 0       # 已经存在 KV cache、无需本轮重新计算的 prefix token 数
         self.num_scheduled_tokens = 0    # scheduler 决定本轮要真正送进模型的 token 数; 和后续 chunked prefill 配合
         self.is_prefill = True           # True: prefill；False: decode
         self.block_table: list[int] = [] # logical KV block -> physical block id
+        self.last_block_hash: int = 0    # 最近一个满block对应的hash code
     
     @property
     def num_blocks(self) -> int: # 对于当前的length需要多少个物理block
@@ -50,7 +51,7 @@ class Sequence:
 
     @property
     def num_uncached_tokens(self) -> int:
-        return self.num_tokens - self.num_cached_tokens
+        return self.num_tokens - self.num_prefix_cached_tokens
 
     def mark_scheduled(self, n: int):
         if n <= 0:

@@ -3,9 +3,12 @@ from collections import deque
 from tinyinfer.config import Config
 from tinyinfer.engine.sequence import Sequence, SequenceStatus
 from tinyinfer.utils import trace_enabled
+from tinyinfer.engine.block_manager import BlockManager
 
 
 # 调度器, 本身不负责运行前向传播, 而是选择合适的sequence给ModelRunner进行前向传播
+# 待改进: 加入真正的Mixed Batching; 改进调度的公平性
+
 
 class Scheduler:
     def __init__(self, config: Config):
@@ -21,6 +24,11 @@ class Scheduler:
         # running：已经被 Scheduler 选中，正在参与 prefill / decode 的请求。
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+
+        self.block_manager = BlockManager(
+            num_blocks=config.num_kvcache_blocks,
+            block_size=config.kvcache_block_size,
+        )
 
     def add(self, seq: Sequence):
         """新请求首先进入 waiting queue。"""
@@ -67,6 +75,8 @@ class Scheduler:
                 "running=", len(self.running),
                 "running_ids=", [s.seq_id for s in self.running],
             )
+        if trace_enabled("TINYINFER_CHECK_KV"):
+            self.block_manager.check_consistency()
 
         scheduled: list[Sequence] = []
         token_budget = self.max_num_batched_tokens # 一轮调度中最多支持多少tokens
@@ -74,11 +84,12 @@ class Scheduler:
         # Phase A: admit waiting requests for prefill
         # ------------------------------------------------------------
         while self.waiting and len(self.running) < self.max_num_seqs:
-            seq = self.waiting[0] # 所有需要prefill的seq必然位于waiting队列中
-            prefill_tokens = seq.num_tokens - seq.num_cached_tokens
-            if prefill_tokens > token_budget:
+            seq = self.waiting[0] # 所有需要prefill的seq必然位于waiting队列中, 这里采用的是FIFO队列, 建模比较简单, 后续要改调度方案
+            prefill_tokens = seq.num_tokens - seq.num_prefix_cached_tokens # 真正需要prefill的token数, 需要减去已经位于prefix cache中的token数目
+            if prefill_tokens > token_budget:           # 确保本轮推理预算足够
                 break
-
+            if not self.block_manager.try_allocate_with_prefix_cache(seq): # 为本次请求分配prefix cache, 更新seq.block_table和blockManager中的block池
+                break
             self.waiting.popleft() # 通过检查, 放入running列表
             seq.status = SequenceStatus.RUNNING
             seq.is_prefill = True
@@ -94,12 +105,14 @@ class Scheduler:
         for seq in list(self.running): # 只有当本轮没有成功调度任何 prefill 时，才会走到 decode
             if token_budget <= 0:
                 break
+            # 已达到最大模型长度，不应该再送进 ModelRunner
+            if seq.num_tokens >= self.max_model_len:
+                continue
             seq.is_prefill = False
             seq.mark_scheduled(1)
             scheduled.append(seq)
             token_budget -= 1
         return scheduled, False
-
 
     def postprocess_naive(self, seqs: list[Sequence], token_ids: list[int]):
         """
@@ -136,27 +149,68 @@ class Scheduler:
                 if seq.seq_id not in done_ids
             )
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
+    def postprocess1(self, seqs: list[Sequence], token_ids: list[int]):
         finished = []
         for seq, token_id in zip(seqs, token_ids): # 针对这一批次每个前向传播完成的Seq进行操作
             # prefill/decode 本轮都确认了原有 token 对应 KV 已经计算完成
-            seq.num_cached_tokens = seq.num_tokens
+            seq.num_prefix_cached_tokens = seq.num_tokens # 这里的num_tokens不包含最新推理出来的那个token
 
-            # sampled token 加入 sequence；这个新 token 的 KV 要等下一轮 decode
+            self.block_manager.cache_computed_full_blocks(seq)
+
+            # sampled token 加入 sequence；这个新 token 的 KV 要等下一轮 decode;
+            # 注意seq.num_prefix_cached_tokens现在会比len(token_ids)少一个
             seq.append_token(token_id)
             seq.num_scheduled_tokens = 0
             seq.is_prefill = False
-
-            if seq.should_stop(self.eos_token_id, self.max_model_len):
-                seq.status = SequenceStatus.FINISHED
 
             if seq.should_stop(self.eos_token_id, self.max_model_len): # 判断停止条件: 出现eos或者达到max_tokens
                 seq.status = SequenceStatus.FINISHED
                 finished.append(seq) # 放入finished列表
 
-        done_ids = {seq.seq_id for seq in finished} # 已完成的seq编号
-        if done_ids:
+        # ============================================================
+        # Finished request：归还它引用的 physical KV blocks
+        # ============================================================
+        for seq in finished:
+            # 教学简化：
+            # request 完成后立即释放全部 KV blocks；
+            # 因而 Prefix Cache 暂时不能跨已结束请求长期保留。
+            # 后续可引入 cached-but-free + eviction/LRU。
+            self.block_manager.free(seq)
+
+        if finished:
+            done_ids = {seq.seq_id for seq in finished} # 已完成的seq编号
             self.running = deque(
                 seq for seq in self.running if seq.seq_id not in done_ids
             )
             
+
+    def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
+        finished = []
+        for seq, token_id in zip(seqs, token_ids):
+            # step1: 当前forward完成，将新增full block注册到Prefix Cache
+            self.block_manager.cache_computed_full_blocks(seq)
+
+            # step2: 加入模型新生成token；该token对应KV下一轮decode计算
+            seq.append_token(token_id)
+
+            # step3: 为下一轮decode提前准备physical block
+            if not self.block_manager.prepare_next_decode_block(seq):
+                # KV block不足，当前教学版本暂不处理preemption
+                pass
+
+            seq.num_scheduled_tokens = 0
+            seq.is_prefill = False
+
+            if seq.should_stop(self.eos_token_id, self.max_model_len):
+                seq.status = SequenceStatus.FINISHED
+                finished.append(seq)
+
+        # 释放结束请求占用的physical KV block
+        for seq in finished:
+            self.block_manager.free(seq)
+
+        if finished:
+            done_ids = {seq.seq_id for seq in finished}
+            self.running = deque(
+                seq for seq in self.running if seq.seq_id not in done_ids
+            )
