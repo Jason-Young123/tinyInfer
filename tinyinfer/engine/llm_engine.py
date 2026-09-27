@@ -21,7 +21,7 @@ class LLMEngine:
         self.scheduler.add(seq)
         return seq.seq_id
 
-    def step(self):
+    def step(self): # 最重要的函数
         seqs, is_prefill = self.scheduler.schedule() # 返回这一轮可以一起前向推理的seq列表, 以及其中是否包含prefill请求
         if not seqs:
             return []

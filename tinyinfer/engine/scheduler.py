@@ -2,7 +2,7 @@ from collections import deque
 
 from tinyinfer.config import Config
 from tinyinfer.engine.sequence import Sequence, SequenceStatus
-from tinyinfer.utils import trace_enabled
+from tinyinfer.utils.debug import trace_enabled
 from tinyinfer.engine.block_manager import BlockManager
 
 
