@@ -1,5 +1,6 @@
 from enum import Enum, auto
 from itertools import count
+from dataclasses import dataclass
 
 from tinyinfer.sampling_params import SamplingParams
 
@@ -128,4 +129,34 @@ class Sequence:
             return True
 
         return False
+
+
+
+# 最小调度单元, 一个处于chunked prefill/decode阶段的seq
+@dataclass(slots=True)
+class ScheduledItem:
+    seq: Sequence
+    start_pos: int
+    num_tokens: int # 这一轮对于该seq而言需要送入模型前向传播的token数
+    is_prefill: bool
+    # 这一条 Sequence 在本轮 forward 完成后是否应该从它最后一个 query 的 logits 采样新 token; 对于chunked prefill阶段为false
+    sample_after: bool 
+
+
+# 调度单元集合, 针对一批次推理
+@dataclass(slots=True)
+class SchedulerOutput:
+    items: list[ScheduledItem]
+
+    @property # 这一批一共要处理多少个token
+    def num_scheduled_tokens(self) -> int:
+        return sum(item.num_tokens for item in self.items)
+
+    @property # 这一批有多少个seq
+    def seqs(self) -> list[Sequence]:
+        return [item.seq for item in self.items]
+
+
+
+
 

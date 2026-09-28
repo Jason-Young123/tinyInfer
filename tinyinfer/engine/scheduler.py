@@ -2,7 +2,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from tinyinfer.config import Config
-from tinyinfer.engine.sequence import Sequence, SequenceStatus
+from tinyinfer.engine.sequence import Sequence, SequenceStatus, ScheduledItem, SchedulerOutput
 from tinyinfer.utils.debug import trace_enabled
 from tinyinfer.engine.block_manager import BlockManager
 
@@ -67,7 +67,7 @@ class Scheduler:
         return list(self.running), is_prefill
 
     # 优先prefill, 其次decode, 且一个batch里面仅有prefill或者decode
-    def schedule(self) -> tuple[list[Sequence], bool]:
+    def schedule_separated(self) -> tuple[list[Sequence], bool]:
         if trace_enabled("TINYINFER_TRACE_SCHED"):
             print(
                 "[sched]",
@@ -114,6 +114,92 @@ class Scheduler:
             scheduled.append(seq)
             token_budget -= 1
         return scheduled, False
+
+
+    # 当前的schedule会额外负责每个seq请求后续block的分配: 
+    #  对于prefill会预分配所有prompt token对应的block(不论admit时是否已经在prefix cache中)
+    #  对于decode, 如果有需求, 会预分配下一个block
+    def schedule(self) -> SchedulerOutput:
+        items: list[ScheduledItem] = []
+        token_budget = self.max_num_batched_tokens
+        seq_budget = self.max_num_seqs
+
+        # Phase A: decode first; 注意当前通常num_computed_token比num_tokens少1, 因为有1个token是上一轮decode得到的、尚未算出KV cache
+        for seq in list(self.running):
+            if token_budget <= 0 or seq_budget <= 0: # token总数/seq总数达到一批推理的容量上限
+                break
+            if seq.num_tokens >= self.max_model_len: # 本条seq的token总数已经达到上限
+                continue
+            if not seq.needs_decode: # 确认当前需要继续decode
+                continue
+
+            start = seq.num_computed_tokens
+            if not self.block_manager.ensure_capacity_for_token_position(seq, start): # 预分配block
+                continue
+
+            seq.mark_scheduled(1)
+            items.append(
+                ScheduledItem(
+                    seq=seq,
+                    start_pos=start,
+                    num_tokens=1,
+                    is_prefill=False,
+                    sample_after=True,
+                )
+            )
+            token_budget -= 1
+            seq_budget -= 1
+
+        # Phase B: then chunked prefill with remaining budget; 注意只有一个seq的chunked prefill彻底完成, 其才会离开waiting list
+        waiting_count = len(self.waiting)
+
+        for _ in range(waiting_count):
+            if token_budget <= 0 or seq_budget <= 0:
+                break
+            seq = self.waiting[0] # 从头部获取第一个waiting的seq
+
+            # First admission: prefix lookup + block allocation.
+            if not seq.block_table: # block_table为空说明必然为首次进行prefill, 因此需要admit
+                if not self.block_manager.try_admit_with_prefix_cache(seq):
+                    break
+
+            remaining = seq.num_prompt_tokens - seq.num_computed_tokens
+            if remaining <= 0:
+                raise RuntimeError("waiting prefill has no remaining prompt tokens")
+
+            chunk = min(remaining, token_budget) # 这次chunk的大小
+            start = seq.num_computed_tokens
+            end = start + chunk
+
+            # try_admit_with_prefix_cache() 当前已为完整 prompt 建好 block table, 因此这里只做防御检查。
+            #if not self.block_manager.ensure_capacity_for_token_position(seq, end - 1):
+            #    break
+
+            sample_after = end == seq.num_prompt_tokens
+            seq.mark_scheduled(chunk)
+
+            items.append(
+                ScheduledItem(
+                    seq=seq,
+                    start_pos=start,
+                    num_tokens=chunk,
+                    is_prefill=True,
+                    sample_after=sample_after,
+                )
+            )
+
+            token_budget -= chunk
+            seq_budget -= 1
+
+            # partial prefill 做 round-robin优先级调度, 最近被处理过的seq被放到 waiting 尾部。
+            self.waiting.rotate(-1)
+
+        return SchedulerOutput(items)
+
+
+
+
+
 
     def postprocess_naive(self, seqs: list[Sequence], token_ids: list[int]):
         """
@@ -184,7 +270,7 @@ class Scheduler:
                 seq for seq in self.running if seq.seq_id not in done_ids
             )
             
-
+    # postprocess会完成prefix cache注册, 但不会进行预分配block(功能被移至schedule中)
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
         finished = []
         for seq, token_id in zip(seqs, token_ids):

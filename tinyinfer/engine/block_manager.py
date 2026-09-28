@@ -188,7 +188,8 @@ class BlockManager:
 
         return cached_block_ids, num_prefix_cached_tokens, prev_hash
 
-    # 仅在scheduler的admission步骤调用一次
+    # 仅在scheduler的admission步骤调用一次, 会把已命中的prefix cache block id加入block_table, 同时预分配完整prompt所需block并写入block_table;
+    # 可以发现, 该函数返回后, block_table中的block_id可能已经存在于prefix cache中, 可能还没有、仅仅预分配
     def try_admit_with_prefix_cache(self, seq: Sequence) -> bool:
         if seq.block_table:
             raise RuntimeError("sequence already allocated")
@@ -241,6 +242,20 @@ class BlockManager:
             prev_hash = block_hash
 
         seq.last_block_hash = prev_hash
+
+    # 预分配block; 这里的token_position = num_computed_tokens
+    def ensure_capacity_for_token_position(self, seq: Sequence, token_position: int) -> bool:
+        required_blocks = token_position // self.block_size + 1
+        missing = required_blocks - len(seq.block_table)
+        if missing <= 0:
+            return True
+        if missing > self.num_free_blocks:
+            return False
+
+        for _ in range(missing):
+            block = self._allocate_block()
+            seq.block_table.append(block.block_id)
+        return True
 
 
 

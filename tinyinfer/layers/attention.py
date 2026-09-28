@@ -156,3 +156,87 @@ class Attention(nn.Module):
     
 
 
+    # unified attention computation
+    def _attend_one(self, q_i, k_hist, v_hist, query_start_pos: int):
+        # q_i:    [Tq, Hq, D] = [q_len, num_q_heads, hidden_dim]
+        # k_hist: [Tk, Hkv, D] = [kv_len/kv_cache_len, num_kv_heads, hidden_dim]
+
+        q = q_i.transpose(0, 1).unsqueeze(0)    # [1, num_q_heads, q_len, hidden_dim]
+        k = k_hist.transpose(0, 1).unsqueeze(0) # [1, num_kv_heads, kv_cache_len, hidden_dim]
+        v = v_hist.transpose(0, 1).unsqueeze(0) # [1, num_kv_heads, kv_cache_len, hidden_dim]
+
+        k, v = self._repeat(k, v)               # [1, num_q_heads, kv_cache_len, hidden_dim]
+
+        tq = q_i.shape[0]
+        tk = k_hist.shape[0]
+
+        q_pos = torch.arange( # e.g. [10, 15], 其中历史kv cache长度为10, 本轮需要计算的token数为5; shape = [5]
+            query_start_pos,
+            query_start_pos + tq,
+            device=q.device,
+        )
+        k_pos = torch.arange(tk, device=q.device) # e.g. 10, shape = [10]
+
+        causal = k_pos.unsqueeze(0) <= q_pos.unsqueeze(1) # shape = [5, 10]
+        # shape = [1, 1, 5, 10] = [Batch, heads/q_heads, q_len, kv_cache_len], 用于后续attention计算时自动广播对齐
+        causal = causal.unsqueeze(0).unsqueeze(0) 
+
+        out = torch.nn.functional.scaled_dot_product_attention( # [1, num_q_heads, q_len, hidden_dim]
+            q,                  # [1, num_q_heads, q_len, hidden_dim]
+            k,                  # [1, num_q_heads, kv_cache_len, hidden_dim]
+            v,                  # [1, num_q_heads, kv_cache_len, hidden_dim]
+            attn_mask=causal,   # 自行提供casual mask
+            is_causal=False,    # 不需要torch自动计算mask
+            scale=self.scale,
+        )
+        return out.squeeze(0).transpose(0, 1) # [q_len, num_q_heads, hidden_dim]
+
+
+    def forward(self, q, k, v): # q/k/v shape: [num_tokens, num_heads, head_dim]
+        ctx = get_context()
+        cache_k, cache_v = self.kv_cache.layer_kv(self.layer_idx) # 获取所有KV cache slot
+
+        # 先把本轮所有新 K/V 写入 paged cache。
+        store_kv(
+            cache_k,
+            cache_v,
+            k,
+            v,
+            ctx.slot_mapping,
+            self.block_size,
+        )
+
+        cu_q = ctx.cu_seqlens_q.tolist()
+        outputs = []
+
+        for i in range(len(cu_q) - 1): # 对这一轮所有需要处理的seq请求逐一调用_attent_one进行attention计算
+            qs, qe = cu_q[i], cu_q[i + 1]
+            q_i = q[qs:qe]
+
+            context_len = int(ctx.context_lens[i].item())
+            q_len = qe - qs
+            query_start = context_len - q_len
+
+            k_hist = gather_sequence_kv(
+                cache_k,
+                ctx.block_tables[i],
+                context_len,
+                self.block_size,
+            )
+            v_hist = gather_sequence_kv(
+                cache_v,
+                ctx.block_tables[i],
+                context_len,
+                self.block_size,
+            )
+
+            outputs.append(
+                self._attend_one(
+                    q_i,
+                    k_hist,
+                    v_hist,
+                    query_start_pos=query_start,
+                )
+            )
+
+        return torch.cat(outputs, dim=0)

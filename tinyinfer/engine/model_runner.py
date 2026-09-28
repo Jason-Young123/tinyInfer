@@ -151,3 +151,73 @@ class ModelRunner:
 
 
 
+
+    def prepare_batch(self, output: SchedulerOutput):
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        q_lens = []
+        context_lens = []
+        is_prefill = []
+        sample_mask = []
+        block_tables = []
+        max_blocks = max(len(item.seq.block_table) for item in output.items) # 注意这里的block已经被预分配
+
+        for item in output.items: # type: ScheduledItems
+            seq = item.seq
+            start = item.start_pos
+            end = start + item.num_tokens
+
+            tokens = seq.token_ids[start:end] # 需要送入模型的tokens
+            pos = list(range(start, end))
+
+            if len(tokens) != item.num_tokens: # 逻辑上冗余, 但python的切片在越界时不会报错, 因此需要保留这个检测
+                raise RuntimeError("scheduler/model-runner token range mismatch")
+            
+            input_ids.extend(tokens) # 各个seq请求的输入tokens直接拼接
+            positions.extend(pos)    # 各个seq请求的tokens绝对位置直接拼接
+            slot_mapping.extend(token_to_slot(seq, p) for p in pos) # 各个seq请求的tokens对应的physical slot直接拼接
+
+            q_lens.append(item.num_tokens)      # 每个seq请求本轮输入tokens的数目
+            context_lens.append(end)            # 每个seq请求本轮前向传播完毕后,总上下文长度
+            is_prefill.append(item.is_prefill)  # 每个seq请求本轮是否处于prefill阶段
+            is_sample.append(item.sample_after) # 每个seq请求本轮是否需要采样下一个token
+
+            table = list(seq.block_table)       # 每个seq请求本轮涉及到的block_table, 且长度向max_len对齐, 末尾补-1
+            table.extend([-1] * (max_blocks - len(table)))
+            block_tables.append(table)
+
+        cu_q = [0]
+        for q_len in q_lens:
+            cu_q.append(cu_q[-1] + q_len)       # 额外对q_lens求cumsum数组
+
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
+        positions = torch.tensor(positions, dtype=torch.long, device=self.device)
+
+        set_context(
+            q_lens=torch.tensor(q_lens, dtype=torch.int32, device=self.device),
+            context_lens=torch.tensor(
+                context_lens, dtype=torch.int32, device=self.device
+            ),
+            cu_seqlens_q=torch.tensor(
+                cu_q, dtype=torch.int32, device=self.device
+            ),
+            max_seqlen_q=max(q_lens, default=0),
+            slot_mapping=torch.tensor(
+                slot_mapping, dtype=torch.long, device=self.device
+            ),
+            block_tables=torch.tensor(
+                block_tables, dtype=torch.int32, device=self.device
+            ),
+            is_prefill=torch.tensor(
+                is_prefill, dtype=torch.bool, device=self.device
+            ),
+            is_sample=torch.tensor(
+                is_sample, dtype=torch.bool, device=self.device
+            ),
+        )
+
+        return input_ids, positions
+
+
+

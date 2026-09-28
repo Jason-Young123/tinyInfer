@@ -6,7 +6,9 @@ import torch
 #（prefill/decode模式、变长序列长度、KV cache位置等）传递给模型 forward 和 Attention kernel?
 @dataclass(slots=True) # dataclass无需手动写__init__构造函数; slots=True可以防止误加成员变量, 从而维护类结构静态稳定
 class Context:
-    is_prefill: bool = False
+    is_prefill:   torch.Tensor | None = None # 每个seq是否还在prefill解读那
+    is_sample:    torch.Tensor | None = None # 每个seq推理结束之后是否需要采样下一个token; 对于decode和最后一次chunked prefill需要, 而过程中的prefill chunk则不需要
+    q_lens:       torch.Tensor | None = None # 本轮这条seq新增计算多少 token
     cu_seqlens_q: torch.Tensor | None = None # cumsum of seqlen_q, 用于存放各个seq的边界信息
     cu_seqlens_k: torch.Tensor | None = None # cumsum of seqlen_k, 用于存放各个seq的边界信息
     max_seqlen_q: int = 0                    # max seqlen_q, 用于fA中拼batch; 注意seqlen_q代表这轮prefill中实际需要新计算的token数目
@@ -15,6 +17,7 @@ class Context:
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
 
+    
 
 _CONTEXT = Context()
 
