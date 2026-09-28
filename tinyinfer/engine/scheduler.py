@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import dataclass
 
 from tinyinfer.config import Config
 from tinyinfer.engine.sequence import Sequence, SequenceStatus

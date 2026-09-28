@@ -73,13 +73,15 @@ class Attention(nn.Module):
         self.kv_cache = kv_cache            # PagedKVCache
         self.block_size = block_size
 
-    def _repeat(k, v):
+    def _repeat(self, k, v):
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
         if self.num_kv_heads != self.num_heads:
             repeat = self.num_heads // self.num_kv_heads
             k_repeated = k.repeat_interleave(repeat, dim=1)
             v_repeated = v.repeat_interleave(repeat, dim=1)
             return k_repeated, v_repeated
-        else
+        else:
             return k, v
 
     # 目前教学版的prefill还没有考虑prefix cache的拼接问题
@@ -143,7 +145,7 @@ class Attention(nn.Module):
     def forward(self, q, k, v): # 这里的q/k/v可能对应多个token, 但只考虑一层
         ctx = get_context() # 调用独立函数获取推理ctx
         cache_k, cache_v = self.kv_cache.layer_kv(self.layer_idx) # 获取某一层的全部KV Cache
-        store(cache_k, cache_v, k, v, ctx.slot_mapping, self.block_size)
+        store_kv(cache_k, cache_v, k, v, ctx.slot_mapping, self.block_size)
 
         if ctx.is_prefill:
             return self._prefill(q, k, v, ctx)
