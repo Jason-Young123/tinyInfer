@@ -51,19 +51,44 @@ class BlockManager:
         # 存在于free_lru的前提: ref_count = 0, 包含两类: 初始化的Block; 所有曾被分配过hash但现在ref_count归零的block
         self.free_lru: OrderedDict[int, None] = OrderedDict((i, None) for i in range(num_blocks)) # 顺序字典, 用于实现LRU替换算法
         self.hash_to_block_ids: dict[int, set[int]] = {}
+        # 性能统计, for future use
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.evictions = 0
+    
+    def stats(self):
+        return {
+            "free_blocks": self.num_free_blocks,
+            "cached_blocks": sum(1 for block in self.blocks if block.hash is not None),
+            "active_blocks": sum(1 for block in self.blocks if block.ref_count > 0),
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "evictions": self.evictions,
+        }
 
     # 检查映射一致性
     def check_consistency(self):
-        free_set = set(self.free_ids)
+        free_set = set(self.free_lru.keys())
         for block in self.blocks:
-            if block.block_id in free_set:
-                assert block.ref_count == 0
+            if block.ref_count == 0:
+                assert block.block_id in free_set
             else:
-                assert block.ref_count > 0
-        for block_hash, block_id in self.hash_to_block_ids.items():
-            block = self.blocks[block_id]
-            assert block.hash == block_hash
-            assert block.ref_count > 0
+                assert block.block_id not in free_set
+
+            if block.hash is not None:
+                ids = self.hash_to_block_ids.get(block.hash, set())
+                assert block.block_id in ids
+                # 如果你的设计规定只有完整 block 才能注册 cache
+                assert len(block.token_ids) == self.block_size
+            else:
+                # 没有 hash 既可能是空 block, 也可能是尚未填满的 active partial block
+                assert len(block.token_ids) <= self.block_size
+
+        for block_hash, ids in self.hash_to_block_ids.items():
+            for block_id in ids:
+                block = self.blocks[block_id]
+                assert block.hash == block_hash
+                # 这里 ref_count 可以是 0, 代表 persistent cached-free block
 
     @property
     def num_free_blocks(self):
@@ -256,7 +281,6 @@ class BlockManager:
             block = self._allocate_block()
             seq.block_table.append(block.block_id)
         return True
-
 
 
 

@@ -20,14 +20,14 @@ class LLMEngine:
         seq = Sequence(token_ids, params)
         self.scheduler.add(seq)
         return seq.seq_id
-
-    def step(self): # 最重要的函数
-        seqs, is_prefill = self.scheduler.schedule() # 返回这一轮可以一起前向推理的seq列表, 以及其中是否包含prefill请求
-        if not seqs:
+    
+    def step(self): # 最重要函数之一
+        output = self.scheduler.schedule()
+        if not output.items:
             return []
-        next_tokens = self.model_runner.run(seqs, is_prefill) # 调用ModelRunner跑一步
-        self.scheduler.postprocess(seqs, next_tokens) # ModelRunner跑完之后交由Scheduler进行后处理; 这一步会修改seqs中的每一个seq
-        return seqs
+        sampled_tokens = self.model_runner.run(output)
+        self.scheduler.postprocess(output, sampled_tokens)
+        return output.items
 
     def generate_token_ids(
         self,

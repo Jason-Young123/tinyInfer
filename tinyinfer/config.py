@@ -1,10 +1,11 @@
+from transformers import AutoConfig
 from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass(slots=True)
 class Config:
-    model: str | None = None
+    model: str | None = None                # 模型地址, 如果是本地文件需要写完整路径
     max_num_batched_tokens: int = 4096      # 一轮调度中, 所有 Sequence 加起来, 最多允许送进模型计算多少个 token
     max_num_seqs: int = 64                  # 一轮调度中, 最多同时允许多少条请求同时推理 
     max_model_len: int = 4096               # 单条 Sequence 最多允许多长的总上下文; 实际单条sequence上下文长度上限 = min(max_model_len, prompt + sampling_params.max_tokens)
@@ -16,6 +17,19 @@ class Config:
     hf_config: Any | None = None
     eos_token_id: int = -1
     num_kvcache_blocks: int = 0             # 运行时根据 GPU 剩余显存计算出来的KV Cache block总数量
+
+    def load_hf_config(self):
+        if self.model is None:
+            raise ValueError("model path/name is required for real runtime")
+        self.hf_config = AutoConfig.from_pretrained(
+            self.model,
+            trust_remote_code=True,
+        )
+        if self.max_model_len > self.hf_config.max_position_embeddings:
+            self.max_model_len = self.hf_config.max_position_embeddings
+
+
+
 
     def validate_runtime_fields(self):
         if self.max_num_seqs <= 0:

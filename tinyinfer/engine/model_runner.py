@@ -1,11 +1,16 @@
 import torch
 from tinyinfer.utils.context import set_context, reset_context
+from tinyinfer.engine.sequence import SchedulerOutput
+from tinyinfer.layers.sampler import Sampler
 
 
+# 将seq内的逻辑token position映射到paged KV的flat slot
 def token_to_slot(seq, token_position: int) -> int:
     block_size = seq.block_size
     logical_block = token_position // block_size
     offset = token_position % block_size
+    if logical_block >= len(seq.block_table):
+        raise RuntimeError("token position has no allocated physical block")
     physical_block = seq.block_table[logical_block]
     return physical_block * block_size + offset
 
@@ -13,26 +18,27 @@ def token_to_slot(seq, token_position: int) -> int:
 
 
 class ToyModelRunner:
-    """Control-plane-only runner used in Day01/02.
-
-    It does not run a neural network. For every sequence it simply emits
-    `(last_token + 1) % 1000` so that the engine loop can be tested.
-    """
-
-    def run(self, sequences, is_prefill: bool): # 当前阶段不论是不是prefill都默认在末尾添加 id+1
+    def run1(self, sequences, is_prefill: bool): # 当前阶段不论是不是prefill都默认在末尾添加 id+1
         next_tokens = []
         for seq in sequences:
             next_tokens.append((seq.last_token + 1) % 1000)
         return next_tokens
 
+    def run(self, output: SchedulerOutput) -> dict[int, int]:
+        result = {}
+        for item in output.items:
+            if item.sample_after:
+                result[item.seq.seq_id] = (item.seq.last_token + 1) % 1000
+        return result
 
 
+# Real model runner
 class ModelRunner:
-    """Real model runner"""
     def __init__(self, config, model=None, device="cuda"):
         self.config = config
         self.model = model
         self.device = torch.device(device)
+        self.sampler = Sampler()
 
     # 对多个seq准备prefill workload
     # 假设一个batch包含3个prefill请求, seq0 = [A, B, C, D, | E, F], seq1 = [a, b, | c, d], seq2 = [|1, 2, 3]; (|右侧代表尚未进入prefix cache的部分)
@@ -87,7 +93,6 @@ class ModelRunner:
         )
         return input_ids, positions
 
-
     # 对多个seq准备decode workload
     # 假设一个batch同样包含3个decode请求, seq0 = [A, B, C], seq1 = [a, b, c, d], seq2 = [1, 2];
     # 则执行完prepare_docode之后(假设block_size = 2):
@@ -130,37 +135,18 @@ class ModelRunner:
         )
         return input_ids, positions
 
-
-    
-    def run(self, seqs, is_prefill: bool):
-        try:
-            if is_prefill:
-                input_ids, positions = self.prepare_prefill(seqs)
-            else:
-                input_ids, positions = self.prepare_decode(seqs)
-
-            logits = self.model.compute_logits(input_ids, positions)
-            temperatures = torch.tensor(
-                [seq.sampling_params.temperature for seq in seqs],
-                dtype=torch.float32,
-                device=logits.device,
-            )
-            return self.model.sample(logits, temperatures).tolist()
-        finally:
-            reset_context()
-
-
-
-
-    def prepare_batch(self, output: SchedulerOutput):
-        input_ids = []
-        positions = []
-        slot_mapping = []
-        q_lens = []
-        context_lens = []
-        is_prefill = []
-        sample_mask = []
-        block_tables = []
+    # 真正的统一调度接口, 实现了mixed batching
+    def prepare_batch(self, output: SchedulerOutput) -> tuple[torch.Tensor, torch.Tensor]:
+        if not output.items:
+            raise ValueError("cannot prepare an empty SchedulerOutput")
+        input_ids: list[int] = []
+        positions: list[int] = []
+        slot_mapping: list[int] = []
+        q_lens: list[int] = []
+        context_lens: list[int] = []
+        is_prefill: list[bool] = []
+        is_sample: list[bool] = []
+        block_tables: list[list[int]] = []
         max_blocks = max(len(item.seq.block_table) for item in output.items) # 注意这里的block已经被预分配
 
         for item in output.items: # type: ScheduledItems
@@ -191,8 +177,8 @@ class ModelRunner:
         for q_len in q_lens:
             cu_q.append(cu_q[-1] + q_len)       # 额外对q_lens求cumsum数组
 
-        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
-        positions = torch.tensor(positions, dtype=torch.long, device=self.device)
+        input_ids_ret = torch.tensor(input_ids, dtype=torch.long, device=self.device)
+        positions_ret = torch.tensor(positions, dtype=torch.long, device=self.device)
 
         set_context(
             q_lens=torch.tensor(q_lens, dtype=torch.int32, device=self.device),
@@ -217,7 +203,53 @@ class ModelRunner:
             ),
         )
 
-        return input_ids, positions
+        return input_ids_ret, positions_ret
+
+
+
+    @torch.no_grad() # 这个函数里的计算不需要构建 autograd 计算图，也不需要反向传播; 适合纯推理任务
+    def run(self, output: SchedulerOutput) -> dict[int, int]:
+        try:
+            input_ids, positions = self.prepare_batch(output) # shape = [num_flat_tokens]
+            # 一个batch全部送入模型进行前向传播 
+            hidden_states = self.model(input_ids, positions) # shape = [num_flat_tokens, hidden_dim]
+
+            # flat hidden_states 中只抽取需要 sample 的每条 sequence 最后一个 query
+            sample_flat_indices: list[int] = []
+            sample_items = []
+            cursor = 0
+
+            for item in output.items:
+                cursor += item.num_tokens
+                if item.sample_after:
+                    sample_flat_indices.append(cursor - 1) # hidden_states中需要被采样的token向量的位置
+                    sample_items.append(item)
+            if not sample_items: # 没有采样需求, 说明当前batch全都是partial prefill, 无final prefill或者decode的seq请求
+                return {}
+
+            idx = torch.tensor(sample_flat_indices, dtype=torch.long, device=hidden_states.device) # [sampled_seq], 即这一批中is_sample=True的seq请求总数
+            sample_hidden = hidden_states.index_select(0, idx) # [sampled_seq, hidden_dim]
+            logits = self.model.compute_logits(sample_hidden)  # [sampled_seq, vocab_size]
+
+            temperatures = torch.tensor( # 为每个需要sample的seq设置temperature, shape = [sampled_seq]
+                [item.seq.sampling_params.temperature for item in sample_items],
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            greedy_mask = torch.tensor( # shape = [sampled_seq]
+                [item.seq.sampling_params.greedy for item in sample_items],
+                dtype=torch.bool,
+                device=logits.device,
+            )
+
+            tokens = self.sampler(logits, temperatures, greedy_mask)
+
+            return { # 第几个item增加了哪个token; 并非所有item都会增加token
+                item.seq.seq_id: int(token) for item, token in zip(sample_items, tokens.tolist())
+            }
+        finally:
+            # Context 是一次 forward 的动态状态，绝不能泄漏到下一轮
+            reset_context()
 
 
 

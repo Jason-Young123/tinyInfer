@@ -31,40 +31,36 @@ class Scheduler:
             block_size=config.kvcache_block_size,
         )
 
-    def add(self, seq: Sequence):
-        """新请求首先进入 waiting queue。"""
+    def add(self, seq: Sequence): # 新请求首先进入 waiting queue
         self.waiting.append(seq)
 
-    def is_finished(self) -> bool:
-        """waiting 和 running 都为空，说明整个引擎没有未完成请求。"""
+    def is_finished(self) -> bool: # waiting 和 running 都为空，说明整个引擎没有未完成请求
         return not self.waiting and not self.running
 
-    def schedule_naive(self) -> tuple[list[Sequence], bool]: # 核心逻辑: 筛选合适的sequence给ModelRuner进行前向传播
-        """
-        决定本轮让哪些 Sequence 执行。最朴素版本, 仅考虑max_num_seqs, 忽略max_num_batched_tokens
-        Day01 策略非常简单：
-        1. 只要 running 还有空位，就按 FIFO 从 waiting 搬进去；
-        2. 当前所有 running Sequence 一起交给 ModelRunner；
-        3. 返回本轮是否包含 prefill 请求。
-        """
-        # 把 waiting 中的请求尽可能填入 running。
-        # deque.popleft() 表示 FIFO：先来的请求先获得运行资格。
-        while self.waiting and len(self.running) < self.max_num_seqs:
-            seq = self.waiting.popleft()
-            seq.status = SequenceStatus.RUNNING
-            self.running.append(seq)
-        
-        # 如果一个请求都没有，就没有任何工作可以交给 ModelRunner。
-        if not self.running:
-            return [], False
-        # 只要当前 running 中还有一条 Sequence 处于 prefill，
-        # 就告诉 ModelRunner：这一轮包含 prefill。
-        # Day01 这里是教学简化。
-        # 后面真正实现时，prefill / decode 会被更精细地分别准备 metadata。
-        is_prefill = any(seq.is_prefill for seq in self.running)
+    def describe_output(output): # for debug only
+        return [
+            {
+                "seq_id": x.seq.seq_id,
+                "phase": "prefill" if x.is_prefill else "decode",
+                "start": x.start_pos,
+                "n": x.num_tokens,
+                "sample": x.sample_after,
+            }
+            for x in output.items
+        ]
 
-        # 返回一个普通 list，避免 ModelRunner 直接修改 Scheduler 内部 deque。
-        return list(self.running), is_prefill
+    def check_consistency(self): # for debug only
+        waiting_ids = {s.seq_id for s in self.waiting}
+        running_ids = {s.seq_id for s in self.running}
+        assert waiting_ids.isdisjoint(running_ids)
+        for seq in self.waiting:
+            assert seq.status is SequenceStatus.WAITING
+            assert seq.num_computed_tokens <= seq.num_prompt_tokens
+        for seq in self.running:
+            assert seq.status is SequenceStatus.RUNNING
+            assert seq.prompt_computed
+
+
 
     # 优先prefill, 其次decode, 且一个batch里面仅有prefill或者decode
     def schedule_separated(self) -> tuple[list[Sequence], bool]:
@@ -197,107 +193,59 @@ class Scheduler:
         return SchedulerOutput(items)
 
 
-
-
-
-
-    def postprocess_naive(self, seqs: list[Sequence], token_ids: list[int]):
-        """
-        ModelRunner 完成本轮 forward 后，把生成结果写回 Sequence。
-        seqs[i] 和 token_ids[i] 一一对应：
-            seqs[0] -> token_ids[0]
-            seqs[1] -> token_ids[1]
-            ...
-        每条 Sequence：
-        1. 追加本轮新生成的 token；
-        2. 第一次 forward 后离开 prefill，进入 decode；
-        3. 检查 max_tokens / EOS；
-        4. 已完成的 Sequence 从 running 中移除。
-        """
+    def postprocess(self, output: SchedulerOutput, sampled_tokens: dict[int, int]):
         finished = []
-        for seq, token_id in zip(seqs, token_ids):
-            # 把模型本轮生成的新 token 写回 Sequence。
-            seq.append_token(token_id)
+        prefill_completed = []
 
-            # Day01 简化：只要跑过一次，就认为 prefill 已完成，
-            # 后面的轮次都进入 autoregressive decode。
-            seq.is_prefill = False
-
-            # 检查是否达到 max_tokens 或遇到 EOS。
-            if seq.should_stop(self.eos_token_id):
-                seq.status = SequenceStatus.FINISHED
-                finished.append(seq)
-
-        # 把本轮已经完成的 Sequence 从 running queue 中删除。
-        if finished:
-            done_ids = {seq.seq_id for seq in finished}
-            self.running = deque(
-                seq for seq in self.running
-                if seq.seq_id not in done_ids
-            )
-
-    def postprocess1(self, seqs: list[Sequence], token_ids: list[int]):
-        finished = []
-        for seq, token_id in zip(seqs, token_ids): # 针对这一批次每个前向传播完成的Seq进行操作
-            # prefill/decode 本轮都确认了原有 token 对应 KV 已经计算完成
-            seq.num_prefix_cached_tokens = seq.num_tokens # 这里的num_tokens不包含最新推理出来的那个token
-
-            self.block_manager.cache_computed_full_blocks(seq)
-
-            # sampled token 加入 sequence；这个新 token 的 KV 要等下一轮 decode;
-            # 注意seq.num_prefix_cached_tokens现在会比len(token_ids)少一个
-            seq.append_token(token_id)
+        for item in output.items:
+            seq = item.seq
+        
+            # 1. 本轮 scheduled token 的 KV 已经完成。
+            seq.num_computed_tokens += item.num_tokens
             seq.num_scheduled_tokens = 0
-            seq.is_prefill = False
 
-            if seq.should_stop(self.eos_token_id, self.max_model_len): # 判断停止条件: 出现eos或者达到max_tokens
-                seq.status = SequenceStatus.FINISHED
-                finished.append(seq) # 放入finished列表
+            # 2. 到新的 computed frontier 为止，注册 newly-full blocks。
+            self.block_manager.cache_computed_full_blocks(seq, upto_token=seq.num_computed_tokens)
 
-        # ============================================================
-        # Finished request：归还它引用的 physical KV blocks
-        # ============================================================
-        for seq in finished:
-            # 教学简化：
-            # request 完成后立即释放全部 KV blocks；
-            # 因而 Prefix Cache 暂时不能跨已结束请求长期保留。
-            # 后续可引入 cached-but-free + eviction/LRU。
-            self.block_manager.free(seq)
+            # 3. partial prefill 不采样，直接结束本 item
+            if not item.sample_after: # 此时sample_tokens实际为None
+                continue
+            else:
+                token_id = sampled_tokens[seq.seq_id]
+                seq.append_token(token_id) # 这里让num_tokens + 1, 但num_computed_tokens没变
 
-        if finished:
-            done_ids = {seq.seq_id for seq in finished} # 已完成的seq编号
-            self.running = deque(
-                seq for seq in self.running if seq.seq_id not in done_ids
-            )
-            
-    # postprocess会完成prefix cache注册, 但不会进行预分配block(功能被移至schedule中)
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
-        finished = []
-        for seq, token_id in zip(seqs, token_ids):
-            # step1: 当前forward完成，将新增full block注册到Prefix Cache
-            self.block_manager.cache_computed_full_blocks(seq)
-
-            # step2: 加入模型新生成token；该token对应KV下一轮decode计算
-            seq.append_token(token_id)
-
-            # step3: 为下一轮decode提前准备physical block
-            if not self.block_manager.prepare_next_decode_block(seq):
-                # KV block不足，当前教学版本暂不处理preemption
-                pass
-
-            seq.num_scheduled_tokens = 0
-            seq.is_prefill = False
-
+            # 4. 采样后检查停止条件。
             if seq.should_stop(self.eos_token_id, self.max_model_len):
                 seq.status = SequenceStatus.FINISHED
                 finished.append(seq)
+                continue
 
-        # 释放结束请求占用的physical KV block
+            # 5. 如果刚完成 prompt，则进入 running decode 集合
+            if item.is_prefill: # 走到这里的prefill必然是final prefill
+                prefill_completed.append(seq)
+                seq.status = SequenceStatus.RUNNING
+
+        # waiting 中删除完成 prefill 或 finished 的请求。
+        remove_ids = { seq.seq_id for seq in prefill_completed + finished}
+        if remove_ids: # waiting list中仅保留原本存在且当前不在remove_ids中的seq
+            self.waiting = deque(seq for seq in self.waiting if seq.seq_id not in remove_ids)
+
+        # 新完成 prefill 的 seq 开始进入 running decode
+        for seq in prefill_completed:
+            self.running.append(seq)
+
+        # running 中删除 finished
+        if finished:
+            done_ids = {seq.seq_id for seq in finished}
+            self.running = deque(seq for seq in self.running if seq.seq_id not in done_ids)
+
+        # 最后释放 request ownership；persistent cached block 不会被 reset。
         for seq in finished:
             self.block_manager.free(seq)
 
-        if finished:
-            done_ids = {seq.seq_id for seq in finished}
-            self.running = deque(
-                seq for seq in self.running if seq.seq_id not in done_ids
-            )
+
+
+
+
+
+
