@@ -5,7 +5,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class Config:
-    model: str | None = None                # 模型地址, 如果是本地文件需要写完整路径
+    model: str | None = None                # 理论模型地址, 如果是本地文件需要写完整路径
     max_num_batched_tokens: int = 4096      # 一轮调度中, 所有 Sequence 加起来, 最多允许送进模型计算多少个 token
     max_num_seqs: int = 64                  # 一轮调度中, 最多同时允许多少条请求同时推理 
     max_model_len: int = 4096               # 单条 Sequence 最多允许多长的总上下文; 实际单条sequence上下文长度上限 = min(max_model_len, prompt + sampling_params.max_tokens)

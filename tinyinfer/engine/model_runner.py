@@ -1,7 +1,10 @@
 import torch
 from tinyinfer.utils.context import set_context, reset_context
 from tinyinfer.engine.sequence import SchedulerOutput
+from tinyinfer.layers.attention import PagedKVCache
 from tinyinfer.layers.sampler import Sampler
+from tinyinfer.models.qwen3 import Qwen3ForCausalLM
+from tinyinfer.utils.loader import load_weights
 
 
 # 将seq内的逻辑token position映射到paged KV的flat slot
@@ -13,6 +16,60 @@ def token_to_slot(seq, token_position: int) -> int:
         raise RuntimeError("token position has no allocated physical block")
     physical_block = seq.block_table[logical_block]
     return physical_block * block_size + offset
+
+
+def dtype_nbytes(dtype:torch.dtype) -> int:
+    return torch.empty((), dtype=dtype).element_size()
+
+# 计算一个token在所有层中所需要的KV cache容量大小
+def bytes_per_kv_block(hf_config, block_size: int, dtype: torch.dtype) -> int:
+    head_dim = int(
+        getattr(
+            hf_config,
+            "head_dim",
+            hf_config.hidden_size // hf_config.num_attention_heads,
+        )
+    )
+    return (
+        int(hf_config.num_hidden_layers)
+        * 2  # K + V
+        * int(block_size)
+        * int(hf_config.num_key_value_heads)
+        * head_dim
+        * dtype_nbytes(dtype)
+    )
+
+# 模型已经驻留 GPU 后，再根据当前 reserved memory 估算 KV block 数
+def estimate_num_kv_blocks(
+    config,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> int:
+    if device.type != "cuda":
+        # CPU 单测不做显存 profile
+        raise ValueError("Invalid device: cpu; Required: cuda")
+        return 0
+
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+
+    total = torch.cuda.get_device_properties(device).total_memory
+    budget = int(total * config.gpu_memory_utilization)
+    reserved = torch.cuda.memory_reserved(device)
+    available_for_kv = max(0, budget - reserved)
+
+    per_block = bytes_per_kv_block(config.hf_config, config.kvcache_block_size, dtype)
+    if per_block <= 0:
+        raise RuntimeError("invalid KV bytes per block")
+
+    num_blocks = available_for_kv // per_block
+    if num_blocks <= 0:
+        raise RuntimeError("no memory left for KV cache under gpu_memory_utilization")
+    return int(num_blocks)
+
+
+
+
 
 
 
@@ -34,11 +91,51 @@ class ToyModelRunner:
 
 # Real model runner
 class ModelRunner:
-    def __init__(self, config, model=None, device="cuda"):
+    def __init__(self, config, device:str="cuda", dtype:torch.dtype=torch.bfloat16): # 把model从初始化列表中移除, 因为model固定为Qwen3ForCausalLM
         self.config = config
-        self.model = model
+        self.dtype = dtype
         self.device = torch.device(device)
         self.sampler = Sampler()
+        
+        if self.config.hf_config is None:
+            self.config.load_hf_config()
+        hf_config = self.config.hf_config
+        hf_config.kvcache_block_size = self.config.kvcache_block_size
+
+        # step1: 先不绑定kv cache, 单纯构造模型
+        self.model = Qwen3ForCausalLM(hf_config, kv_cache = None).to(device = self.device, dtype = self.dtype)
+
+        # step2: 加载真实的Qwen3 checkpoint
+        report = load_weights(self.model, self.config.model, strict = True)
+        self.load_report = report
+        self.model.eval()
+
+        # step3: 模型参数驻留后再估算KV容量
+        num_blocks = estimate_num_kv_blocks(self.config, self.device, self.dtype)
+        self.config.num_kvcache_blocks = num_blocks
+        head_dim = int(
+            getattr(
+                hf_config,
+                "head_dim",
+                hf_config.hidden_size // hf_config.num_attention_heads,
+            )
+        )
+
+        # step4: 创建唯一共享的PagedKVCache
+        self.kv_cache = PagedKVCache(
+            num_layers=hf_config.num_hidden_layers,
+            num_blocks=num_blocks,
+            block_size=self.config.kvcache_block_size,
+            num_kv_heads=hf_config.num_key_value_heads,
+            head_dim=head_dim,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        # step5: 绑定到所有 decoder layers, 对应到所有attn
+        self.model.set_kv_cache(self.kv_cache)
+
+
 
     # 对多个seq准备prefill workload
     # 假设一个batch包含3个prefill请求, seq0 = [A, B, C, D, | E, F], seq1 = [a, b, | c, d], seq2 = [|1, 2, 3]; (|右侧代表尚未进入prefix cache的部分)

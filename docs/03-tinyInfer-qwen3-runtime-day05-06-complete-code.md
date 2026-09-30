@@ -2360,19 +2360,16 @@ def bytes_per_kv_block(hf_config, block_size: int, dtype: torch.dtype) -> int:
     )
 
 
+# 模型已经驻留 GPU 后，再根据当前 reserved memory 估算 KV block 数
 def estimate_num_kv_blocks(
     config,
     device: torch.device,
     dtype: torch.dtype,
 ) -> int:
-    """模型已经驻留 GPU 后，再根据当前 reserved memory 估算 KV block 数。"""
     if device.type != "cuda":
-        # CPU 单测不做显存 profile；要求测试显式给 num_kvcache_blocks。
-        if config.num_kvcache_blocks <= 0:
-            raise ValueError(
-                "CPU runtime requires config.num_kvcache_blocks > 0"
-            )
-        return config.num_kvcache_blocks
+        # CPU 单测不做显存 profile
+        raise ValueError("Invalid device: cpu; Required: cuda")
+        return 0
 
     torch.cuda.synchronize(device)
     torch.cuda.empty_cache()
@@ -2382,19 +2379,13 @@ def estimate_num_kv_blocks(
     reserved = torch.cuda.memory_reserved(device)
     available_for_kv = max(0, budget - reserved)
 
-    per_block = bytes_per_kv_block(
-        config.hf_config,
-        config.kvcache_block_size,
-        dtype,
-    )
+    per_block = bytes_per_kv_block(config.hf_config, config.kvcache_block_size, dtype)
     if per_block <= 0:
         raise RuntimeError("invalid KV bytes per block")
 
     num_blocks = available_for_kv // per_block
     if num_blocks <= 0:
-        raise RuntimeError(
-            "no memory left for KV cache under gpu_memory_utilization"
-        )
+        raise RuntimeError("no memory left for KV cache under gpu_memory_utilization")
     return int(num_blocks)
 ```
 <!-- /03-CODE-COMPLETE: kv-capacity -->
