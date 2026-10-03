@@ -157,7 +157,8 @@ class Scheduler:
             # First admission: prefix lookup + block allocation.
             if not seq.block_table: # block_table为空说明必然为首次进行prefill, 因此需要admit
                 if not self.block_manager.try_admit_with_prefix_cache(seq):
-                    break
+                    self.waiting.rotate(-1)
+                    continue
 
             remaining = seq.num_prompt_tokens - seq.num_computed_tokens
             if remaining <= 0:
@@ -167,12 +168,8 @@ class Scheduler:
             start = seq.num_computed_tokens
             end = start + chunk
 
-            # try_admit_with_prefix_cache() 当前已为完整 prompt 建好 block table, 因此这里只做防御检查。
-            #if not self.block_manager.ensure_capacity_for_token_position(seq, end - 1):
-            #    break
-
             sample_after = end == seq.num_prompt_tokens
-            seq.mark_scheduled(chunk)
+            seq.mark_scheduled(chunk) # 开始调度一刻
 
             items.append(
                 ScheduledItem(
@@ -187,7 +184,7 @@ class Scheduler:
             token_budget -= chunk
             seq_budget -= 1
 
-            # partial prefill 做 round-robin优先级调度, 最近被处理过的seq被放到 waiting 尾部。
+            # partial prefill 做 round-robin优先级调度, 最近被处理过的seq被放到 waiting 尾部
             self.waiting.rotate(-1)
 
         return SchedulerOutput(items)
@@ -216,7 +213,8 @@ class Scheduler:
 
             # 4. 采样后检查停止条件。
             if seq.should_stop(self.eos_token_id, self.max_model_len):
-                seq.status = SequenceStatus.FINISHED
+                #seq.status = SequenceStatus.FINISHED
+                seq.mark_finished()
                 finished.append(seq)
                 continue
 

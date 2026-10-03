@@ -33,7 +33,7 @@ class LLMEngine:
     
     def step(self): # 最重要函数之一
         output = self.scheduler.schedule()
-        if not output.items:
+        if not output.items: # 没有收集到可以跑的请求, 可能是全跑完了, 也有可能是KV cache block分配满了
             return []
         sampled_tokens = self.model_runner.run(output)
         self.scheduler.postprocess(output, sampled_tokens)
@@ -55,7 +55,7 @@ class LLMEngine:
 
         # 创建Sequence列表并加入到Scheduler中由其进行调度
         seqs = []
-        for token_ids, p in zip(prompts, params):
+        for token_ids, p in zip(prompts, params): # seq达到一刻
             seq = Sequence(token_ids, p)
             seqs.append(seq)
             self.scheduler.add(seq)
@@ -71,7 +71,8 @@ class LLMEngine:
             {
                 "token_ids": seq.token_ids[seq.num_prompt_tokens:], # decode阶段生成的token id, 不包含prompt
                 "all_token_ids": list(seq.token_ids), # 所有的token_id
-                "num_cached_tokens": seq.num_cached_tokens
+                "num_cached_tokens": seq.num_cached_tokens, # prefix cache命中的token数目
+                "statistics": seq.statistics(),
             }
             for seq in seqs
         ]

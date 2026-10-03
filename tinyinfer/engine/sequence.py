@@ -1,6 +1,7 @@
 from enum import Enum, auto
 from itertools import count
 from dataclasses import dataclass
+import time
 
 from tinyinfer.sampling_params import SamplingParams
 
@@ -37,7 +38,34 @@ class Sequence:
         self.num_scheduled_tokens = 0           # 这一轮要新增计算多少 token
         self.block_table: list[int] = []        # logical KV block -> physical block id
         self.last_block_hash: int = 0           # 最近一个满block对应的hash code
-    
+
+        # performance
+        self.arrival_time = time.perf_counter() # 创建seq的时间戳
+        self.first_scheduled_time: float | None = None # 第一次被调度的时间戳
+        self.first_token_time: float | None = None # TTFT
+        self.finished_time: float | None = None
+        self.output_token_times: list[float] = []
+
+    @property
+    def last_token(self) -> int:
+        """返回当前最后一个 token，decode 阶段通常只需要它作为新输入。"""
+        return self.token_ids[-1]
+
+    @property
+    def num_tokens(self) -> int: # 有property修饰的成员函数可以直接像访问成员变量一样访问
+        """当前总 token 数 = prompt + completion。"""
+        return len(self.token_ids)
+
+    @property
+    def num_completion_tokens(self) -> int:
+        """已经生成的 token 数。"""
+        return self.num_tokens - self.num_prompt_tokens
+
+    @property
+    def is_finished(self) -> bool:
+        """当前请求是否已经结束。"""
+        return self.status is SequenceStatus.FINISHED
+
     @property
     def num_blocks(self) -> int: # 对于当前的length需要多少个物理block
         n = self.num_tokens
@@ -72,42 +100,29 @@ class Sequence:
         end = min(begin + self.block_size, self.num_tokens)
         return self.token_ids[begin:end]
 
-    @property
-    def num_uncached_tokens(self) -> int:
-        return self.num_tokens - self.num_prefix_cached_tokens
-
-
-
     def mark_scheduled(self, n: int): # 把本轮要计算KV cache的token数设为n
         if n <= 0:
             raise ValueError("scheduled token count must be positive")
         if self.num_computed_tokens + n > self.num_tokens: # 比如decode阶段通常每轮针对1个token计算KV cache, 如果为2则不满足条件
             raise ValueError("cannot schedule beyond available token ids")
         self.num_scheduled_tokens = n
-
-    @property
-    def last_token(self) -> int:
-        """返回当前最后一个 token，decode 阶段通常只需要它作为新输入。"""
-        return self.token_ids[-1]
-
-    @property
-    def num_tokens(self) -> int: # 有property修饰的成员函数可以直接像访问成员变量一样访问
-        """当前总 token 数 = prompt + completion。"""
-        return len(self.token_ids)
-
-    @property
-    def num_completion_tokens(self) -> int:
-        """已经生成的 token 数。"""
-        return self.num_tokens - self.num_prompt_tokens
-
-    @property
-    def is_finished(self) -> bool:
-        """当前请求是否已经结束。"""
-        return self.status is SequenceStatus.FINISHED
+        if self.first_scheduled_time is None: # 首次被调度
+            self.first_scheduled_time = time.perf_counter()
 
     def append_token(self, token_id: int):
         """把模型新生成的 token 追加到当前 Sequence。"""
         self.token_ids.append(int(token_id))
+
+        now = time.perf_counter()
+        if self.first_token_time is None:
+            self.first_token_time = now
+        self.output_token_times.append(now)
+
+    def mark_finished(self) -> None:
+        self.status = SequenceStatus.FINISHED
+        self.finished_time = time.perf_counter()
+        #print("only for test: ", self.finished_time)
+
 
     def should_stop(self, eos_token_id: int, max_model_len: int) -> bool:
         """达到 completion 上限、模型上下文上限，或生成 EOS 时停止。"""
@@ -129,6 +144,97 @@ class Sequence:
             return True
 
         return False
+
+
+    # 性能统计: 单位统一为s;
+    def statistics(self) -> dict[str, int | float | None]:
+        # token statistics
+        prompt_tokens = self.num_prompt_tokens
+        output_tokens = self.num_completion_tokens
+        decode_tokens = max(0, output_tokens - 1)
+        total_tokens = self.num_tokens
+        cached_tokens = self.num_cached_tokens
+
+        # arrival -> first scheduled
+        queue_time = None
+        if self.first_scheduled_time is not None:
+            queue_time = self.first_scheduled_time - self.arrival_time
+
+        # first scheduled -> first output token
+        prefill_time = None
+        if self.first_scheduled_time is not None and self.first_token_time is not None:
+            prefill_time = self.first_token_time - self.first_scheduled_time
+
+        # first output token -> finished
+        decode_time = None
+        if self.first_token_time is not None and self.finished_time is not None:
+            decode_time = self.finished_time - self.first_token_time
+
+        # arrival -> first output token
+        ttft = None
+        if self.first_token_time is not None:
+            ttft = self.first_token_time - self.arrival_time
+
+        # first scheduled -> finished
+        service_time = None
+        if self.first_scheduled_time is not None and self.finished_time is not None:
+            service_time = self.finished_time - self.first_scheduled_time
+
+        # arrival -> finished
+        e2e_latency = None
+        if self.finished_time is not None:
+            e2e_latency = self.finished_time - self.arrival_time
+
+        # average latency per decode token
+        tpot = None
+        if decode_time is not None and decode_tokens > 0:
+            tpot = decode_time / decode_tokens
+
+        # adjacent output-token latency
+        itls = [
+            self.output_token_times[i] - self.output_token_times[i - 1]
+            for i in range(1, len(self.output_token_times))
+        ]
+        mean_itl = sum(itls) / len(itls) if itls else None
+        min_itl = min(itls) if itls else None
+        max_itl = max(itls) if itls else None
+
+        # steady-state decode throughput
+        decode_throughput = None
+        if decode_time is not None and decode_time > 0 and decode_tokens > 0:
+            decode_throughput = decode_tokens / decode_time
+
+        # whole-request output throughput
+        request_throughput = None
+        if e2e_latency is not None and e2e_latency > 0:
+            request_throughput = output_tokens / e2e_latency
+
+        return {
+            # token statistics
+            "prompt_tokens": prompt_tokens,
+            "output_tokens": output_tokens, # 输出总token
+            "decode_tokens": decode_tokens, # decode输出总token, = output_tokens - 1
+            "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+
+            # latency
+            "queue_time": queue_time,
+            "prefill_time": prefill_time,
+            "decode_time": decode_time,
+            "ttft": ttft,
+            "service_time": service_time,
+            "e2e_latency": e2e_latency,
+            "tpot": tpot,
+            "mean_itl": mean_itl,
+            "min_itl": min_itl,
+            "max_itl": max_itl,
+
+            # throughput
+            "decode_throughput": decode_throughput,
+            "request_throughput": request_throughput,
+        }
+
+
 
 
 
