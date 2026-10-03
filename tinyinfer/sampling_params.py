@@ -6,6 +6,7 @@ class SamplingParams:
     temperature: float = 1.0
     max_tokens: int = 64        # 最多允许生成的token数
     ignore_eos: bool = False
+    greedy: bool = False
 
     def __post_init__(self):
         if self.temperature <= 0.0:

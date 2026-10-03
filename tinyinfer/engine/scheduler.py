@@ -204,7 +204,7 @@ class Scheduler:
             seq.num_computed_tokens += item.num_tokens
             seq.num_scheduled_tokens = 0
 
-            # 2. 到新的 computed frontier 为止，注册 newly-full blocks。
+            # 2. 到新的 computed frontier 为止，注册 newly-full blocks
             self.block_manager.cache_computed_full_blocks(seq, upto_token=seq.num_computed_tokens)
 
             # 3. partial prefill 不采样，直接结束本 item

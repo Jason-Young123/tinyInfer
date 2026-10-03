@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer
 from tinyinfer.config import Config
-from tinyinfer.engine.model_runner import ToyModelRunner
+from tinyinfer.engine.model_runner import ModelRunner
 from tinyinfer.engine.scheduler import Scheduler
 from tinyinfer.engine.sequence import Sequence
 from tinyinfer.sampling_params import SamplingParams
@@ -69,7 +69,7 @@ class LLMEngine:
         seqs.sort(key=lambda x: x.seq_id)
         return [
             {
-                "token_ids": seq.token_ids[seq.num_prompt_tokens:], # decode阶段生成的token id
+                "token_ids": seq.token_ids[seq.num_prompt_tokens:], # decode阶段生成的token id, 不包含prompt
                 "all_token_ids": list(seq.token_ids), # 所有的token_id
                 "num_cached_tokens": seq.num_cached_tokens
             }

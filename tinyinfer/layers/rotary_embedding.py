@@ -42,8 +42,35 @@ class RotaryEmbedding(nn.Module):
             )
         )
 
-        # inv_freq 是模型状态，但不是 checkpoint parameter。
+        # inv_freq 是模型状态且为tensor, 但不是 checkpoint parameter; 又希望能够使用.cuda/.to等管理函数, 因此要注册为buffer而非
+        # 简单的成员变量; 简单的成员变量在model.to()的时候数据类型、device都不会跟随着变化
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+
+    def _apply(self, fn, recurse=True):
+        """
+        覆盖 nn.Module._apply。
+        目的:
+            model.to(dtype=torch.bfloat16)会递归调用 _apply, buffer也会dtype转换。
+        但是:
+            inv_freq需要保持FP32
+        所以:
+            允许device变化但禁止dtype变化。
+        """
+        # 保存原始FP32 inv_freq
+        inv_freq_fp32 = self.inv_freq
+
+        # 正常执行parameter转换和其他buffer转换
+        super()._apply(fn, recurse)
+
+        # 恢复inv_freq:只跟随device
+        self.inv_freq = inv_freq_fp32.to(device=self.inv_freq.device)
+
+        return self
+
+
+
+
 
     def _apply_rotary(
         self,
@@ -73,6 +100,9 @@ class RotaryEmbedding(nn.Module):
             return rotated
         return torch.cat((rotated, x_pass), dim=-1)
 
+
+
+
     def forward(
         self,
         q: torch.Tensor,
@@ -89,7 +119,7 @@ class RotaryEmbedding(nn.Module):
             raise ValueError("q/k head_dim mismatch")
 
         positions_fp32 = positions.to(device=q.device, dtype=torch.float32)
-        inv_freq = self.inv_freq.to(device=q.device)
+        inv_freq = self.inv_freq.to(device=q.device, dtype=torch.float32)
 
         # [T] outer [rotary_dim/2] -> [T, rotary_dim/2]
         freqs = torch.outer(positions_fp32, inv_freq)

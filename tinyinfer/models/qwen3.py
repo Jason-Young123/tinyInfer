@@ -13,6 +13,22 @@ from tinyinfer.layers.linear import (
 from tinyinfer.layers.rotary_embedding import RotaryEmbedding
 
 
+# 辅助函数: 获取rope的base角频率
+def _get_rope_theta(config):
+    if hasattr(config, "rope_theta"): # 存在config.rope_theta, 直接返回
+        return config.rope_theta
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+
+    if rope_scaling is not None: # 不存在config.rope_theta, 但是存在config.rope_scaling
+        return rope_scaling.get("rope_theta", 10000.0) # 存在config.rope_scaling.rope_theta则直接返回, 否则默认返回10000
+
+    return 10000.0 # 既不存在config.rope_theta也不存在config.rope_scaling, 默认返回10000
+
+
+
+
+
 # 组装Attention
 class Qwen3Attention(nn.Module):
     def __init__(self, config, layer_idx:int, kv_cache=None):
@@ -38,7 +54,7 @@ class Qwen3Attention(nn.Module):
         self.rotary_emb = RotaryEmbedding(
             head_dim = self.head_dim,
             rotary_dim = self.head_dim, # 默认所有head_dim都rot
-            base = float(getattr(config, "rope_theta", 10000.0))
+            base = _get_rope_theta(config)
         )
 
         self.attn = Attention(
@@ -64,7 +80,7 @@ class Qwen3Attention(nn.Module):
     # 整体shape变化: [num_total_tokens, hidden_size] -> [num_total_tokens, hidden_size]
     def forward(self, hidden_states:torch.Tensor, positions:torch.Tensor) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
-        q, k, v = self.qkv_project.split_qkv(qkv)
+        q, k, v = self.qkv_proj.split_qkv(qkv)
     
         q = q.view(-1, self.num_heads, self.head_dim) # -1代表自动推导的维度
         k = k.view(-1, self.num_kv_heads, self.head_dim)
@@ -81,8 +97,6 @@ class Qwen3Attention(nn.Module):
         out = self.attn(q, k, v) # 内部会根据context内容进行token拆分(为不同seq请求)
         out = out.reshape(-1, self.q_size) # shape = [T, Hq * D]
         return self.o_proj(out) # shape = [T, hidden_size]
-
-
 
 
 class Qwen3MLP(nn.Module):
@@ -151,12 +165,25 @@ class Qwen3Model(nn.Module):
             layer.set_kv_cache(kv_cache)
     
     # 完整的前向传播流程
-    def forward(self, input_ids:torch.Tensor, positions:torch.Tensor) -> torch.Tensor:
-        # [num_flat_tokens] -> [num_flat_tokens, hidden_dim], 把token_id变为token向量
-        hidden_states = self.embed_tokens(input_ids) 
-        for layer in self.layers: # 逐层前向传播
+    def forward(self, input_ids:torch.Tensor, positions:torch.Tensor, output_hidden_states: bool = False):
+        hidden_states = self.embed_tokens(input_ids) # [num_flat_tokens] -> [num_flat_tokens, hidden_dim], 把token_id变为token向量
+        
+        if not output_hidden_states: # 正常推理路径：不保存任何中间结果
+            for layer in self.layers:
+                hidden_states = layer(hidden_states, positions)
+            hidden_states = self.norm(hidden_states)
+            return hidden_states, None
+
+        # debug / 等价性测试路径
+        all_hidden_states = [hidden_states]
+        for layer in self.layers:
             hidden_states = layer(hidden_states, positions)
-        return self.norm
+            all_hidden_states.append(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        # 为了和 HF hidden_states[-1] 对齐，用 final RMSNorm 输出替换最后一个 decoder layer raw output
+        all_hidden_states[-1] = hidden_states
+
+        return hidden_states, all_hidden_states
 
 
 # Backbone + 最后的LM Head
@@ -175,9 +202,9 @@ class Qwen3ForCausalLM(nn.Module):
         self.model.set_kv_cache(kv_cache)
 
     # forward等价于backbone中的forward, 和最终的compute_logits解耦
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, output_hidden_states: bool = False) -> torch.Tensor:
         # 只返回 hidden states；mixed batch 中并非所有 token 都需要 logits
-        return self.model(input_ids, positions)
+        return self.model(input_ids, positions, output_hidden_states)
 
     # compute_logits 产出[num_flat_tokens, vocab_size], 仍然不是最终的next_token id list; 还差一个sampler
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

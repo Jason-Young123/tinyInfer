@@ -6,7 +6,7 @@ from torch import nn
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-1, dtype=None, device=None):
         super().__init__()
-        self.weight = nn.Parameter(
+        self.weight = nn.Parameter( # 每个token共享同一组hidden维度缩放参数
             torch.ones(hidden_size, dtype=dtype, device=device)
         )
         self.eps = eps

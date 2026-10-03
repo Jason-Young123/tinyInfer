@@ -309,7 +309,7 @@ class ModelRunner:
         try:
             input_ids, positions = self.prepare_batch(output) # shape = [num_flat_tokens]
             # 一个batch全部送入模型进行前向传播 
-            hidden_states = self.model(input_ids, positions) # shape = [num_flat_tokens, hidden_dim]
+            hidden_states, _ = self.model(input_ids, positions, output_hidden_states = False) # shape = [num_flat_tokens, hidden_dim]
 
             # flat hidden_states 中只抽取需要 sample 的每条 sequence 最后一个 query
             sample_flat_indices: list[int] = []

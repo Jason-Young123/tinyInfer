@@ -3284,7 +3284,8 @@ def _set_single_prefill_context(num_tokens: int, block_size: int):
 
 
 @pytest.mark.model
-def test_cold_prefill_logits_match_hf(local_model_path):
+def test_cold_prefill_logits_match_hf():
+    local_model_path = "/home/jason/huggingface/Qwen3-0.6B"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 

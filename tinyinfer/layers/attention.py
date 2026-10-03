@@ -177,7 +177,7 @@ class Attention(nn.Module):
         ctx = get_context()
         cache_k, cache_v = self.kv_cache.layer_kv(self.layer_idx) # 获取所有KV cache slot
 
-        # 先把本轮所有新 K/V 写入 paged cache。
+        # 先把本轮所有新 K/V 写入 paged cache; [CRITICAL]
         store_kv(
             cache_k,
             cache_v,
