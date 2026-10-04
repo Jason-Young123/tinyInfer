@@ -319,7 +319,7 @@ class ModelRunner:
             for item in output.items:
                 cursor += item.num_tokens
                 if item.sample_after:
-                    sample_flat_indices.append(cursor - 1) # hidden_states中需要被采样的token向量的位置
+                    sample_flat_indices.append(cursor - 1) # hidden_states中需要被采样的token向量的位置; 注意不论是last prefill还是decode, 默认一个seq请求仅有一个token需要采样
                     sample_items.append(item)
             if not sample_items: # 没有采样需求, 说明当前batch全都是partial prefill, 无final prefill或者decode的seq请求
                 return {}

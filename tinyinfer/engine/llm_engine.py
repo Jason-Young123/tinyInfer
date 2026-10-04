@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from transformers import AutoTokenizer
 from tinyinfer.config import Config
 from tinyinfer.engine.model_runner import ModelRunner
@@ -6,8 +8,16 @@ from tinyinfer.engine.sequence import Sequence
 from tinyinfer.sampling_params import SamplingParams
 
 
-# 整体调用链条: LLM -> LLMEngine -> 创建seqs列表 -> Scheduler -> ModelRunner
+@dataclass(slots=True)
+class StreamUpdate:
+    seq_id: int
+    token_id: int
+    completion_token_ids: list[int]
+    finished: bool
+    statistics: dict | None
 
+
+# 整体调用链条: LLM -> LLMEngine -> 创建seqs列表 -> Scheduler -> ModelRunner
 class LLMEngine:
     def __init__(self, config: Config | None = None, device: str = "cuda"):
         self.config = config or Config()
@@ -30,14 +40,66 @@ class LLMEngine:
         seq = Sequence(token_ids, params)
         self.scheduler.add(seq)
         return seq.seq_id
-    
-    def step(self): # 最重要函数之一
-        output = self.scheduler.schedule()
-        if not output.items: # 没有收集到可以跑的请求, 可能是全跑完了, 也有可能是KV cache block分配满了
-            return []
-        sampled_tokens = self.model_runner.run(output)
-        self.scheduler.postprocess(output, sampled_tokens)
-        return output.items
+ 
+    def build_chat_prompt(self, text:str, system_prompt:str|None = None) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": text})
+        if self.tokenizer.chat_template:
+            kwargs = dict(tokenize=False, add_generation_prompt=True)
+            try:
+                return self.tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
+            except TypeError:
+                return self.tokenizer.apply_chat_template(messages, **kwargs)
+        return text
+
+    # 把 UI 字符串转换成真正 chat-template prompt, 再进入原 Scheduler
+    def add_text_request(
+        self,
+        text: str,
+        params: SamplingParams,
+        system_prompt: str | None = None,
+    ) -> int:
+        prompt = self.build_chat_prompt(text, system_prompt)
+        token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        return self.add_request(token_ids, params)
+
+
+    def step_with_updates(self) -> tuple[list, list[StreamUpdate]]:
+        # 对内: 走通schedule -> run -> postprocess的完整一轮调度流程
+        output = self.scheduler.schedule() # 从waiting池子中挑选本轮进行推理的请求
+        if not output.items:
+            return [], []
+        sampled_tokens = self.model_runner.run(output) # 输出为dict of {seq_id: token_id}, 表示所有需要采样的请求所产生的下一个token id是什么
+        self.scheduler.postprocess(output, sampled_tokens) # 将产生的下一个token拼接到对应的seq请求中, 并注册prefix cache; 管理waiting/running list
+
+        # 对外: 把当前一轮真正生成token的请求信息打包送给前端, 进行网页端聊天框刷新
+        updates = []
+        for item in output.items:
+            token_id = sampled_tokens.get(item.seq.seq_id) # 得到产生next token请求的next token id
+            if token_id is None: # 如果这一批的某个seq没有生成下一个token则直接跳过, 无需进行前端网页刷新
+                continue
+            seq = item.seq
+            updates.append(
+                StreamUpdate(
+                    seq_id=seq.seq_id,
+                    token_id=token_id,
+                    completion_token_ids=list(
+                        seq.token_ids[seq.num_prompt_tokens:]
+                    ),
+                    finished=seq.is_finished,
+                    statistics=seq.statistics() if seq.is_finished else None,
+                )
+            )
+
+        return output.items, updates # 前者是内部信息(这一轮调度了哪些请求, 不论是否生成next token); 后者是对外信息(这一轮哪些请求生成了next token从而需要刷新聊天框)
+
+    def step(self): # 对内的前向传播调度函数, 不对外传递信息
+        items, _ = self.step_with_updates()
+        return items
+
+
 
     # 针对所有seq请求生成/decode完整的token id序列
     def generate_token_ids(

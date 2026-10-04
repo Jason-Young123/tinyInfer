@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build metadata
+*.egg-info/
+build/
+dist/
+
+# Test cache
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
