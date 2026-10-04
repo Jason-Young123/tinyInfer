@@ -15,7 +15,6 @@ from tinyinfer.runtime.dynamic_engine import (
 from tinyinfer.sampling_params import SamplingParams
 
 
-
 STATIC_DIR = Path(__file__).with_name("static")
 
 
@@ -48,11 +47,33 @@ class SocketHub:
                 self.clients.discard(socket)
 
 
+def _parse_sampling_params(
+    item: dict,
+    default_max_tokens: int,
+    default_temperature: float,
+    default_greedy: bool,
+) -> SamplingParams:
+    max_tokens = int(item.get("max_tokens", default_max_tokens))
+    temperature = float(item.get("temperature", default_temperature))
+    greedy = bool(item.get("greedy", default_greedy))
+
+    if not 32 <= max_tokens <= 8192:
+        raise ValueError("max_tokens must be in [32, 8192]")
+    if not 0.1 <= temperature <= 2.0:
+        raise ValueError("temperature must be in [0.1, 2.0]")
+
+    return SamplingParams(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        greedy=greedy,
+    )
+
+
 def create_app(
     service: DynamicEngineService,
     max_tokens: int = 128,
     temperature: float = 0.8,
-    greedy: bool = False,
+    greedy: bool = True,
 ) -> FastAPI:
     hub = SocketHub()
 
@@ -78,6 +99,11 @@ def create_app(
     async def websocket_endpoint(socket: WebSocket):
         await socket.accept()
         hub.clients.add(socket)
+
+        snapshot = service.current_runtime_snapshot()
+        if snapshot is not None:
+            await socket.send_json({"type": "runtime", **snapshot})
+
         try:
             while True:
                 payload = await socket.receive_json()
@@ -89,20 +115,36 @@ def create_app(
                 )
 
                 requests = []
+                requested_users = []
                 for item in raw_requests:
                     user_id = str(item.get("user_id", ""))
                     text = str(item.get("text", ""))
                     if not user_id or not text.strip():
                         continue
+                    requested_users.append(user_id)
+
+                    try:
+                        params = _parse_sampling_params(
+                            item,
+                            max_tokens,
+                            temperature,
+                            greedy,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        await socket.send_json(
+                            {
+                                "type": "error",
+                                "user_id": user_id,
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+
                     requests.append(
                         SubmitRequest(
                             user_id=user_id,
                             text=text,
-                            params=SamplingParams(
-                                temperature=temperature,
-                                max_tokens=max_tokens,
-                                greedy=greedy,
-                            ),
+                            params=params,
                         )
                     )
 
@@ -111,7 +153,7 @@ def create_app(
                     {
                         "type": "accepted",
                         "accepted_users": accepted,
-                        "requested_users": [r.user_id for r in requests],
+                        "requested_users": requested_users,
                     }
                 )
         except WebSocketDisconnect:
@@ -120,7 +162,3 @@ def create_app(
             hub.clients.discard(socket)
 
     return app
-
-
-
-

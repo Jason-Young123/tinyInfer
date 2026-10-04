@@ -11,15 +11,59 @@
     <section class="users" id="users"></section>
 
     <aside class="side">
-      <section class="panel statistics">
-        <div class="panel-title">Statistics</div>
-        <div class="placeholder">Reserved for runtime metrics</div>
+      <section class="panel statistics-panel">
+        <div class="panel-head global-head">
+          <div>
+            <div class="panel-title">Statistics</div>
+            <div class="subtle">Runtime telemetry · refresh ~4 Hz</div>
+          </div>
+          <div class="live-dot"><span></span>live</div>
+        </div>
+
+        <section class="stats-section resource-section">
+          <div class="section-title">Resource statistics</div>
+
+          <div class="memory-bar" id="memory-bar" aria-label="GPU memory budget composition">
+            <div class="memory-segment unused" id="segment-unused"></div>
+            <div class="memory-segment reserved" id="segment-reserved"></div>
+            <div class="memory-segment allocated" id="segment-allocated"></div>
+            <div class="memory-segment available" id="segment-available"></div>
+          </div>
+
+          <div class="memory-legend">
+            <div><span class="swatch unused"></span><span>Unused</span><strong id="mem-unused">--</strong></div>
+            <div><span class="swatch reserved"></span><span>Reserved</span><strong id="mem-reserved">--</strong></div>
+            <div><span class="swatch allocated"></span><span>Allocated</span><strong id="mem-allocated">--</strong></div>
+            <div><span class="swatch available"></span><span>Available</span><strong id="mem-available">--</strong></div>
+          </div>
+
+          <div class="kv-head">
+            <div>
+              <div class="section-label">KV cache blocks</div>
+              <div class="subtle" id="kv-summary">Waiting for runtime snapshot</div>
+            </div>
+            <div class="kv-key"><span class="swatch allocated"></span>allocated <span class="swatch available"></span>available</div>
+          </div>
+          <div class="block-grid" id="block-grid"></div>
+          <div class="resource-note">Reserved is captured before KV pool creation. Allocated / available show the logical Paged KV block state.</div>
+        </section>
+
+        <section class="stats-section performance-section">
+          <div class="section-title-row">
+            <div class="section-title">Performance statistics</div>
+            <div class="request-count" id="completed-requests">0 completed</div>
+          </div>
+          <div class="performance-grid" id="performance-grid"></div>
+        </section>
       </section>
 
       <section class="panel controller">
         <div class="panel-title">Controller</div>
         <div class="controller-grid">
           <button id="start-all" class="primary" disabled>Start all ready</button>
+          <div class="controller-slot">future</div>
+          <div class="controller-slot">future</div>
+          <div class="controller-slot">future</div>
         </div>
       </section>
     </aside>

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import torch
 
 from transformers import AutoTokenizer
 from tinyinfer.config import Config
@@ -98,6 +99,46 @@ class LLMEngine:
     def step(self): # 对内的前向传播调度函数, 不对外传递信息
         items, _ = self.step_with_updates()
         return items
+
+    
+    # 资源快照只读取 CPU metadata，不做 CUDA synchronize。
+    def runtime_resource_snapshot(self) -> dict:
+        device = self.model_runner.device
+        if device.type != "cuda": # cpu端直接忽略
+            return {
+                "total_bytes": 0,
+                "unused_bytes": 0,
+                "reserved_bytes": 0,
+                "allocated_kv_bytes": 0,
+                "available_kv_bytes": 0,
+                "block_bytes": 0,
+                "num_blocks": 0,
+                "active_block_ids": [],
+            }
+
+        profile = self.model_runner.resource_profile
+        total_bytes = profile.total_bytes
+        unused_bytes = profile.unused_bytes
+        reserved_bytes = profile.reserved_bytes
+        block_bytes = profile.block_bytes
+        blocks = self.scheduler.block_manager.blocks
+        active_block_ids = [
+            block.block_id for block in blocks if block.ref_count > 0
+        ]
+        allocated_kv_bytes = len(active_block_ids) * block_bytes
+        available_kv_bytes = max(0, total_bytes - unused_bytes - reserved_bytes - allocated_kv_bytes)
+
+        return {
+            "total_bytes": total_bytes,
+            "unused_bytes": unused_bytes,
+            "reserved_bytes": reserved_bytes,
+            "allocated_kv_bytes": int(allocated_kv_bytes),
+            "available_kv_bytes": int(available_kv_bytes),
+            "block_bytes": int(block_bytes),
+            "num_blocks": len(blocks),
+            "active_block_ids": active_block_ids,
+        }
+
 
 
 

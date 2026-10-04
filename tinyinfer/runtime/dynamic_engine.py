@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
+import time
 from typing import Callable
 
 from tinyinfer.engine.llm_engine import LLMEngine
 from tinyinfer.sampling_params import SamplingParams
+
+
+PERFORMANCE_KEYS = (
+    "queue_time",
+    "prefill_time",
+    "decode_time",
+    "ttft",
+    "service_time",
+    "e2e_latency",
+    "tpot",
+    "decode_throughput",
+    "request_throughput",
+)
 
 
 @dataclass(slots=True)
@@ -19,10 +34,12 @@ class SubmitRequest:
 @dataclass(slots=True)
 class RuntimeEvent:
     type: str
-    user_id: str
+    user_id: str | None = None
     seq_id: int | None = None
     text: str | None = None
     statistics: dict | None = None
+    resource: dict | None = None
+    performance: dict | None = None
     message: str | None = None
 
     def to_dict(self) -> dict:
@@ -34,16 +51,28 @@ class DynamicEngineService:
         self,
         engine: LLMEngine,
         system_prompt: str = "You are a helpful, concise assistant.",
+        snapshot_interval_s: float = 0.25,
     ):
         self.engine = engine
         self.system_prompt = system_prompt
+        self.snapshot_interval_s = snapshot_interval_s
+
         self._commands: Queue[list[SubmitRequest] | None] = Queue()
         self._stop = Event()
         self._thread: Thread | None = None
         self._event_sink: Callable[[dict], None] | None = None
+
         self._busy_users: set[str] = set()
         self._busy_lock = Lock()
         self._seq_to_user: dict[int, str] = {}
+
+        self._metric_sums = {key: 0.0 for key in PERFORMANCE_KEYS}
+        self._metric_counts = {key: 0 for key in PERFORMANCE_KEYS}
+        self._completed_requests = 0
+
+        self._last_snapshot_at = 0.0
+        self._snapshot_lock = Lock()
+        self._last_runtime_snapshot: dict | None = None
 
     def start(self, event_sink: Callable[[dict], None]) -> None:
         if self._thread and self._thread.is_alive():
@@ -87,6 +116,10 @@ class DynamicEngineService:
     def is_user_busy(self, user_id: str) -> bool:
         with self._busy_lock:
             return user_id in self._busy_users
+
+    def current_runtime_snapshot(self) -> dict | None:
+        with self._snapshot_lock:
+            return deepcopy(self._last_runtime_snapshot)
 
     def _emit(self, event: RuntimeEvent) -> None:
         if self._event_sink:
@@ -132,7 +165,52 @@ class DynamicEngineService:
                 return
             self._admit_batch(batch)
 
-    def _handle_updates(self, updates) -> None:
+    def _record_statistics(self, statistics: dict | None) -> None:
+        if not statistics:
+            return
+        self._completed_requests += 1
+        for key in PERFORMANCE_KEYS:
+            value = statistics.get(key)
+            if value is None:
+                continue
+            self._metric_sums[key] += float(value)
+            self._metric_counts[key] += 1
+
+    def _performance_snapshot(self) -> dict:
+        averages = {}
+        for key in PERFORMANCE_KEYS:
+            count = self._metric_counts[key]
+            averages[key] = (
+                self._metric_sums[key] / count if count else None
+            )
+        return {
+            "completed_requests": self._completed_requests,
+            "averages": averages,
+        }
+
+    def _emit_runtime_snapshot(self, force: bool = False) -> None:
+        now = time.perf_counter()
+        if not force and now - self._last_snapshot_at < self.snapshot_interval_s:
+            return
+        self._last_snapshot_at = now
+
+        snapshot = {
+            "resource": self.engine.runtime_resource_snapshot(),
+            "performance": self._performance_snapshot(),
+        }
+        with self._snapshot_lock:
+            self._last_runtime_snapshot = deepcopy(snapshot)
+
+        self._emit(
+            RuntimeEvent(
+                type="runtime",
+                resource=snapshot["resource"],
+                performance=snapshot["performance"],
+            )
+        )
+
+    def _handle_updates(self, updates) -> bool:
+        any_finished = False
         for update in updates:
             user_id = self._seq_to_user.get(update.seq_id)
             if user_id is None:
@@ -153,6 +231,8 @@ class DynamicEngineService:
             )
 
             if update.finished:
+                any_finished = True
+                self._record_statistics(update.statistics)
                 self._emit(
                     RuntimeEvent(
                         type="finished",
@@ -164,6 +244,7 @@ class DynamicEngineService:
                 )
                 self._seq_to_user.pop(update.seq_id, None)
                 self._release_user(user_id)
+        return any_finished
 
     def _fail_active_requests(self, message: str) -> None:
         for seq_id, user_id in list(self._seq_to_user.items()):
@@ -179,11 +260,14 @@ class DynamicEngineService:
         self._seq_to_user.clear()
 
     def _worker_loop(self) -> None:
+        self._emit_runtime_snapshot(force=True)
+
         while not self._stop.is_set():
             if self.engine.scheduler.is_finished():
                 try:
                     batch = self._commands.get(timeout=0.1)
                 except Empty:
+                    self._emit_runtime_snapshot()
                     continue
                 if batch is None:
                     continue
@@ -199,10 +283,9 @@ class DynamicEngineService:
                     raise RuntimeError(
                         "scheduler made no progress while requests remain"
                     )
-                self._handle_updates(updates)
+                any_finished = self._handle_updates(updates)
+                self._emit_runtime_snapshot(force=any_finished)
             except Exception as exc:
                 self._fail_active_requests(str(exc))
+                self._emit_runtime_snapshot(force=True)
                 return
-
-
-

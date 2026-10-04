@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 import torch
+
 from tinyinfer.utils.context import set_context, reset_context
 from tinyinfer.engine.sequence import SchedulerOutput
 from tinyinfer.layers.attention import PagedKVCache
@@ -39,37 +41,57 @@ def bytes_per_kv_block(hf_config, block_size: int, dtype: torch.dtype) -> int:
         * dtype_nbytes(dtype)
     )
 
+
+# Resource Statistics 统一采用同一套预算口径，四部分严格相加等于 GPU 总显存：
+# Unused：TOTAL_MEM * (1 - gpu_memory_utilization)，策略上完全不使用的预留区域，灰色。
+# Reserved：模型加载完成、KV pool 创建之前 torch.cuda.memory_reserved() 的值，包含 weights 在内的 PyTorch reserved memory，深橘色。
+# Allocated：当前 `ref_count > 0` 的 KV blocks 总容量，浅橘色
+# Available：KV 预算中尚未被 active block 占用的容量，绿色
+@dataclass(frozen=True, slots=True)
+class KVMemoryProfile:
+    total_bytes: int
+    budget_bytes: int
+    unused_bytes: int
+    reserved_bytes: int
+    block_bytes: int
+    num_blocks: int
+
+
 # 模型已经驻留 GPU 后，再根据当前 reserved memory 估算 KV block 数
-def estimate_num_kv_blocks(
+def build_kv_memory_profile(
     config,
     device: torch.device,
     dtype: torch.dtype,
-) -> int:
+) -> KVMemoryProfile:
     if device.type != "cuda":
-        # CPU 单测不做显存 profile
         raise ValueError("Invalid device: cpu; Required: cuda")
-        return 0
 
+    # 清掉 allocator 中可释放的历史缓存后再做 KV profile。
     torch.cuda.synchronize(device)
     torch.cuda.empty_cache()
 
-    total = torch.cuda.get_device_properties(device).total_memory
-    budget = int(total * config.gpu_memory_utilization)
-    reserved = torch.cuda.memory_reserved(device)
-    available_for_kv = max(0, budget - reserved)
+    total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
+    budget_bytes = int(total_bytes * config.gpu_memory_utilization)
+    unused_bytes = total_bytes - budget_bytes
+    reserved_bytes = int(torch.cuda.memory_reserved(device))
+    block_bytes = bytes_per_kv_block(config.hf_config, config.kvcache_block_size, dtype)
 
-    per_block = bytes_per_kv_block(config.hf_config, config.kvcache_block_size, dtype)
-    if per_block <= 0:
+    if block_bytes <= 0:
         raise RuntimeError("invalid KV bytes per block")
 
-    num_blocks = available_for_kv // per_block
+    kv_budget_bytes = max(0, budget_bytes - reserved_bytes)
+    num_blocks = kv_budget_bytes // block_bytes
     if num_blocks <= 0:
         raise RuntimeError("no memory left for KV cache under gpu_memory_utilization")
-    return int(num_blocks)
 
-
-
-
+    return KVMemoryProfile(
+        total_bytes=total_bytes,
+        budget_bytes=budget_bytes,
+        unused_bytes=unused_bytes,
+        reserved_bytes=reserved_bytes,
+        block_bytes=int(block_bytes),
+        num_blocks=int(num_blocks),
+    )
 
 
 
@@ -111,7 +133,10 @@ class ModelRunner:
         self.model.eval()
 
         # step3: 模型参数驻留后再估算KV容量
-        num_blocks = estimate_num_kv_blocks(self.config, self.device, self.dtype)
+        #num_blocks = estimate_num_kv_blocks(self.config, self.device, self.dtype)
+        #self.config.num_kvcache_blocks = num_blocks
+        self.resource_profile = build_kv_memory_profile(self.config, self.device, self.dtype)
+        num_blocks = self.resource_profile.num_blocks
         self.config.num_kvcache_blocks = num_blocks
         head_dim = int(
             getattr(
