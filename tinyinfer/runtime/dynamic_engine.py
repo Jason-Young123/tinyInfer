@@ -132,7 +132,7 @@ class DynamicEngineService:
     def _admit_batch(self, batch: list[SubmitRequest]) -> None:
         for request in batch:
             try:
-                seq_id = self.engine.add_text_request(
+                seq_id = self.engine.add_text_request( # 关键逻辑: 进入waiting list
                     request.text,
                     request.params,
                     self.system_prompt,
@@ -259,7 +259,7 @@ class DynamicEngineService:
             self._release_user(user_id)
         self._seq_to_user.clear()
 
-    def _worker_loop(self) -> None:
+    def _worker_loop(self) -> None: # 最核心的循环函数
         self._emit_runtime_snapshot(force=True)
 
         while not self._stop.is_set():

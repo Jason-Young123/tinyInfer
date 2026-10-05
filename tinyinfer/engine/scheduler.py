@@ -120,17 +120,26 @@ class Scheduler:
         token_budget = self.max_num_batched_tokens
         seq_budget = self.max_num_seqs
 
-        # Phase A: decode first; 注意当前通常num_computed_token比num_tokens少1, 因为有1个token是上一轮decode得到的、尚未算出KV cache
-        for seq in list(self.running):
-            if token_budget <= 0 or seq_budget <= 0: # token总数/seq总数达到一批推理的容量上限
+        # waiting非空时，Phase A至少给prefill预留1个seq预算
+        decode_seq_budget = seq_budget if not self.waiting else max(0, seq_budget - 1)
+
+        # Phase A: decode first with round-robin; 注意当前通常num_computed_token比num_tokens少1, 因为有1个token是上一轮decode得到的、尚未算出KV cache
+        running_count = len(self.running)
+        for _ in range(running_count):
+            if token_budget <= 0 or decode_seq_budget <= 0:  # 只要waiting-list不为空, 则至少预留一个slot给prefill
                 break
-            if seq.num_tokens >= self.max_model_len: # 本条seq的token总数已经达到上限
+            
+            seq = self.running[0]
+            if seq.num_tokens >= self.max_model_len: # 本条seq的token总数已经达到上限;
+                self.running.rotate(-1)
                 continue
             if not seq.needs_decode: # 确认当前需要继续decode
+                self.running.rotate(-1)
                 continue
 
             start = seq.num_computed_tokens
             if not self.block_manager.ensure_capacity_for_token_position(seq, start): # 预分配block
+                self.running.rotate(-1)
                 continue
 
             seq.mark_scheduled(1)
@@ -145,10 +154,13 @@ class Scheduler:
             )
             token_budget -= 1
             seq_budget -= 1
+            decode_seq_budget -= 1
+
+            # 最近被decode调度过的seq放到running尾部
+            self.running.rotate(-1)
 
         # Phase B: then chunked prefill with remaining budget; 注意只有一个seq的chunked prefill彻底完成, 其才会离开waiting list
         waiting_count = len(self.waiting)
-
         for _ in range(waiting_count):
             if token_budget <= 0 or seq_budget <= 0:
                 break
