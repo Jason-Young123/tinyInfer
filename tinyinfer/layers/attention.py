@@ -1,7 +1,10 @@
+import os
 import torch
 from torch import nn
 
 from tinyinfer.utils.context import get_context
+
+from tinyinfer.layers.flash_attention import flash_attention # self-implemented flash attention
 
 # 一些独立的辅助函数
 def store_kv(
@@ -98,6 +101,8 @@ class PagedKVCache(nn.Module):
         return self.storage[layer_idx, 0], self.storage[layer_idx, 1]
 
 
+_FLASH_LOGGED = False
+_TORCH_LOGGED = False
 
 class Attention(nn.Module):
     def __init__(
@@ -121,6 +126,13 @@ class Attention(nn.Module):
         self.kv_cache = kv_cache            # PagedKVCache
         self.block_size = block_size
 
+        # 增加attention backend选择(torch or flashattention); runtime backend，不污染模型 config。
+        self.backend = os.getenv("TINYINFER_ATTENTION_BACKEND", "torch").strip().lower()
+        if self.backend not in {"torch", "flash"}:
+            raise ValueError(
+                "TINYINFER_ATTENTION_BACKEND must be 'torch' or 'flash'"
+            )
+
     def set_kv_cache(self, kv_cache: PagedKVCache) -> None:
         if kv_cache.block_size != self.block_size:
             raise ValueError("KV cache block_size mismatch")
@@ -141,6 +153,27 @@ class Attention(nn.Module):
     def _attend_one(self, q_i, k_hist, v_hist, query_start_pos: int):
         # q_i:    [Tq, Hq, D] = [q_len, num_q_heads, hidden_dim]
         # k_hist: [Tk, Hkv, D] = [kv_len/kv_cache_len, num_kv_heads, hidden_dim]
+
+        # backend选择为 FlashAttention 时, 直接处理原始 GQA heads 与 query_start_pos
+        if self.backend == "flash":
+            global _FLASH_LOGGED
+            if not _FLASH_LOGGED: # 打印backend
+                print("[tinyInfer] Attention backend: self-implemented flash attention")
+                _FLASH_LOGGED = True
+            
+            return flash_attention(
+                q_i,
+                k_hist,
+                v_hist,
+                query_start_pos=query_start_pos,
+                scale=self.scale,
+                is_causal=True
+            )
+        
+        global _TORCH_LOGGED
+        if not _TORCH_LOGGED: # 打印backend
+            print("[tinyInfer] Attention backend: torch.scaled_dot_product_attention")
+            _TORCH_LOGGED = True
 
         q = q_i.transpose(0, 1).unsqueeze(0)    # [1, num_q_heads, q_len, hidden_dim]
         k = k_hist.transpose(0, 1).unsqueeze(0) # [1, num_kv_heads, kv_cache_len, hidden_dim]
