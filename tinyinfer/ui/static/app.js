@@ -1,4 +1,5 @@
-const USERS = ["user1", "user2", "user3"];
+// [MOD] User panel 从 3 个扩展到 5 个。
+const USERS = ["user1", "user2", "user3", "user4", "user5"];
 const PERFORMANCE_METRICS = [
   ["queue_time", "Queue", "latency"],
   ["prefill_time", "Prefill", "latency"],
@@ -20,6 +21,7 @@ const ws = new WebSocket(`ws://${location.host}/ws`);
 
 let blockNodes = [];
 let activeBlocks = new Set();
+let cachedBlocks = new Set(); // [MOD] 独立保存 cached-free block。
 
 function makePanel(userId, index) {
   const panel = document.createElement("section");
@@ -27,7 +29,7 @@ function makePanel(userId, index) {
   panel.innerHTML = `
     <div class="panel-head">
       <div class="panel-title">User ${index + 1}</div>
-      <div class="status">Idle</div>
+      <div class="status idle">Idle</div>
     </div>
     <div class="output"></div>
     <div class="user-lower">
@@ -40,8 +42,8 @@ function makePanel(userId, index) {
           <div class="mini-title">Controller</div>
           <div class="control-row">
             <span>max tokens</span>
-            <input class="max-tokens" type="range" min="32" max="8192" step="32" value="1024">
-            <span class="control-value max-value">128</span>
+            <input class="max-tokens" type="range" min="32" max="8192" step="32" value="8192">
+            <span class="control-value max-value">8192</span>
           </div>
           <div class="control-row">
             <span>temperature</span>
@@ -51,7 +53,7 @@ function makePanel(userId, index) {
           <div class="toggle-row">
             <span>greedy</span>
             <label class="switch">
-              <input class="greedy" type="checkbox" checked>
+              <input class="greedy" type="checkbox">
               <span class="slider-toggle"></span>
             </label>
           </div>
@@ -59,9 +61,20 @@ function makePanel(userId, index) {
         <section class="mini-panel user-statistics">
           <div class="mini-title">Last request</div>
           <div class="user-stat-grid">
-            <div class="user-stat"><span>TTFT</span><strong class="stat-ttft">--</strong></div>
-            <div class="user-stat"><span>TPOT</span><strong class="stat-tpot">--</strong></div>
-            <div class="user-stat"><span>E2E</span><strong class="stat-e2e">--</strong></div>
+            <div class="user-stat-row single">
+              <div class="user-stat"><span>TTFT</span><strong class="stat-ttft">--</strong></div>
+            </div>
+            <div class="user-stat-row pair">
+              <div class="user-stat"><span>TPOT mean</span><strong class="stat-tpot">--</strong></div>
+              <div class="user-stat"><span>TPOT p50</span><strong class="stat-tpot-p50">--</strong></div>
+            </div>
+            <div class="user-stat-row pair">
+              <div class="user-stat"><span>TPOT p95</span><strong class="stat-tpot-p95">--</strong></div>
+              <div class="user-stat"><span>TPOT p99</span><strong class="stat-tpot-p99">--</strong></div>
+            </div>
+            <div class="user-stat-row single">
+              <div class="user-stat"><span>E2E</span><strong class="stat-e2e">--</strong></div>
+            </div>
           </div>
         </section>
       </div>
@@ -81,6 +94,9 @@ function makePanel(userId, index) {
     greedy: panel.querySelector(".greedy"),
     statTTFT: panel.querySelector(".stat-ttft"),
     statTPOT: panel.querySelector(".stat-tpot"),
+    statTPOTP50: panel.querySelector(".stat-tpot-p50"), // [MOD]
+    statTPOTP95: panel.querySelector(".stat-tpot-p95"), // [MOD]
+    statTPOTP99: panel.querySelector(".stat-tpot-p99"), // [MOD]
     statE2E: panel.querySelector(".stat-e2e"),
     busy: false,
     outputBase: "",
@@ -111,6 +127,7 @@ function setBusy(state, busy) {
   state.greedy.disabled = busy;
   state.status.textContent = busy ? "Running" : "Idle";
   state.status.classList.toggle("busy", busy);
+  state.status.classList.toggle("idle", !busy);
   refreshControls();
 }
 
@@ -163,6 +180,11 @@ function formatLatency(value) {
   return `${(value * 1000).toFixed(value < 0.1 ? 1 : 0)} ms`;
 }
 
+function formatSeconds(value) {
+  if (value == null) return "--";
+  return `${value.toFixed(2)} s`;
+}
+
 function formatThroughput(value) {
   if (value == null) return "--";
   return `${value.toFixed(2)} tok/s`;
@@ -170,6 +192,8 @@ function formatThroughput(value) {
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return "--";
+  const mib = bytes / (1024 ** 2);
+  if (mib < 1024) return `${mib.toFixed(2)} MB`;
   return `${(bytes / (1024 ** 3)).toFixed(2)} GB`;
 }
 
@@ -183,7 +207,10 @@ function updateUserStatistics(state, statistics) {
   if (!statistics) return;
   state.statTTFT.textContent = formatLatency(statistics.ttft);
   state.statTPOT.textContent = formatLatency(statistics.tpot);
-  state.statE2E.textContent = formatLatency(statistics.e2e_latency);
+  state.statTPOTP50.textContent = formatLatency(statistics.tpot_p50); // [MOD]
+  state.statTPOTP95.textContent = formatLatency(statistics.tpot_p95); // [MOD]
+  state.statTPOTP99.textContent = formatLatency(statistics.tpot_p99); // [MOD]
+  state.statE2E.textContent = formatSeconds(statistics.e2e_latency);
 }
 
 function setSegment(id, bytes, total) {
@@ -197,33 +224,55 @@ function ensureBlockGrid(numBlocks) {
   blockGrid.replaceChildren();
   blockNodes = new Array(numBlocks);
   activeBlocks = new Set();
+  cachedBlocks = new Set(); // [MOD]
 
   const fragment = document.createDocumentFragment();
   for (let blockId = 0; blockId < numBlocks; blockId += 1) {
     const node = document.createElement("div");
-    node.className = "kv-block";
-    node.title = `block ${blockId}`;
+    node.className = "kv-block empty"; // [MOD] 默认状态明确为 empty。
+    node.title = `block ${blockId} · empty`;
     blockNodes[blockId] = node;
     fragment.appendChild(node);
   }
   blockGrid.appendChild(fragment);
 }
 
-function updateBlockGrid(numBlocks, activeBlockIds) {
-  ensureBlockGrid(numBlocks);
-  const next = new Set(activeBlockIds ?? []);
+// [MOD] 一个 block 只属于 empty / cached / active 三种状态之一。
+function paintBlock(blockId, activeSet, cachedSet) {
+  const node = blockNodes[blockId];
+  if (!node) return;
 
-  for (const blockId of activeBlocks) {
-    if (!next.has(blockId) && blockNodes[blockId]) {
-      blockNodes[blockId].classList.remove("active");
-    }
+  node.classList.remove("empty", "cached", "active");
+  if (activeSet.has(blockId)) {
+    node.classList.add("active");
+    node.title = `block ${blockId} · active`;
+  } else if (cachedSet.has(blockId)) {
+    node.classList.add("cached");
+    node.title = `block ${blockId} · cached`;
+  } else {
+    node.classList.add("empty");
+    node.title = `block ${blockId} · empty`;
   }
-  for (const blockId of next) {
-    if (!activeBlocks.has(blockId) && blockNodes[blockId]) {
-      blockNodes[blockId].classList.add("active");
-    }
+}
+
+function updateBlockGrid(numBlocks, activeBlockIds, cachedBlockIds) {
+  ensureBlockGrid(numBlocks);
+  const nextActive = new Set(activeBlockIds ?? []);
+  const nextCached = new Set(cachedBlockIds ?? []);
+
+  // [MOD] 只重绘状态发生过变化的 block，避免每次刷新扫描全部 DOM。
+  const touched = new Set([
+    ...activeBlocks,
+    ...cachedBlocks,
+    ...nextActive,
+    ...nextCached,
+  ]);
+  for (const blockId of touched) {
+    paintBlock(blockId, nextActive, nextCached);
   }
-  activeBlocks = next;
+
+  activeBlocks = nextActive;
+  cachedBlocks = nextCached;
 }
 
 function updateResource(resource) {
@@ -246,9 +295,13 @@ function updateResource(resource) {
 
   const numBlocks = resource.num_blocks ?? 0;
   const activeIds = resource.active_block_ids ?? [];
+  const cachedIds = resource.cached_block_ids ?? []; // [MOD]
+  // [MOD] 数量统计和单block容量拆成两行，避免挤压右侧三态图例。
   document.querySelector("#kv-summary").textContent =
-    `${activeIds.length} / ${numBlocks} allocated · ${formatBytes(resource.block_bytes ?? 0)} / block`;
-  updateBlockGrid(numBlocks, activeIds);
+    `${activeIds.length} active · ${cachedIds.length} cached · ${numBlocks} total`;
+  document.querySelector("#kv-block-size").textContent =
+    `${formatBytes(resource.block_bytes ?? 0)} / block`;
+  updateBlockGrid(numBlocks, activeIds, cachedIds);
 }
 
 function initPerformanceGrid() {
@@ -275,6 +328,13 @@ function updatePerformance(performance) {
     card.textContent = kind === "throughput"
       ? formatThroughput(value)
       : formatLatency(value);
+  }
+
+  // [MOD] 全局 TPOT 分位数是所有已完成请求的 request-level TPOT 分布。
+  const percentiles = performance.tpot_percentiles ?? {};
+  for (const key of ["p50", "p95", "p99"]) {
+    const node = document.querySelector(`[data-tpot-percentile="${key}"]`);
+    node.textContent = formatLatency(percentiles[key]);
   }
 }
 

@@ -55,7 +55,7 @@ class LLMEngine:
                 return self.tokenizer.apply_chat_template(messages, **kwargs)
         return text
 
-    # 把 UI 字符串转换成真正 chat-template prompt, 再进入原 Scheduler
+    # 把 UI 字符串转换成真正 chat-template prompt, 再进入原 Scheduler; 等价于generate函数中的把prompt转化为token id的步骤
     def add_text_request(
         self,
         text: str,
@@ -96,12 +96,12 @@ class LLMEngine:
 
         return output.items, updates # 前者是内部信息(这一轮调度了哪些请求, 不论是否生成next token); 后者是对外信息(这一轮哪些请求生成了next token从而需要刷新聊天框)
 
-    def step(self): # 对内的前向传播调度函数, 不对外传递信息
+    def step(self): # 对内的前向传播调度函数, 不对外传递信息; 仅静态调度会调用这个函数
         items, _ = self.step_with_updates()
         return items
 
     
-    # 资源快照只读取 CPU metadata，不做 CUDA synchronize。
+    # 资源快照只读取 CPU metadata，不做 CUDA synchronize; 仅获取resource快照
     def runtime_resource_snapshot(self) -> dict:
         device = self.model_runner.device
         if device.type != "cuda": # cpu端直接忽略
@@ -114,6 +114,7 @@ class LLMEngine:
                 "block_bytes": 0,
                 "num_blocks": 0,
                 "active_block_ids": [],
+                "cached_block_ids": []
             }
 
         profile = self.model_runner.resource_profile
@@ -124,6 +125,11 @@ class LLMEngine:
         blocks = self.scheduler.block_manager.blocks
         active_block_ids = [
             block.block_id for block in blocks if block.ref_count > 0
+        ]
+        cached_block_ids = [
+            block.block_id
+            for block in blocks
+            if block.ref_count == 0 and block.hash is not None
         ]
         allocated_kv_bytes = len(active_block_ids) * block_bytes
         available_kv_bytes = max(0, total_bytes - unused_bytes - reserved_bytes - allocated_kv_bytes)
@@ -136,12 +142,13 @@ class LLMEngine:
             "available_kv_bytes": int(available_kv_bytes),
             "block_bytes": int(block_bytes),
             "num_blocks": len(blocks),
-            "active_block_ids": active_block_ids,
+            "active_block_ids": active_block_ids, # ref_count > 0
+            "cached_block_ids": cached_block_ids # ref_count = 0但曾经被分配过
         }
 
 
 
-
+    # 以下这两个函数均针对静态调度: 所有请求同步到达, 并在全部结束推理后返回完整output
     # 针对所有seq请求生成/decode完整的token id序列
     def generate_token_ids(
         self,

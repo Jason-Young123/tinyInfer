@@ -11,6 +11,15 @@ from tinyinfer.engine.llm_engine import LLMEngine
 from tinyinfer.sampling_params import SamplingParams
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * q)
+    return ordered[index]
+
+
+
 PERFORMANCE_KEYS = (
     "queue_time",
     "prefill_time",
@@ -46,7 +55,7 @@ class RuntimeEvent:
         return asdict(self)
 
 
-class DynamicEngineService:
+class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
     def __init__(
         self,
         engine: LLMEngine,
@@ -60,7 +69,7 @@ class DynamicEngineService:
         self._commands: Queue[list[SubmitRequest] | None] = Queue()
         self._stop = Event()
         self._thread: Thread | None = None
-        self._event_sink: Callable[[dict], None] | None = None
+        self._event_sink: Callable[[dict], None] | None = None # 最后指向
 
         self._busy_users: set[str] = set()
         self._busy_lock = Lock()
@@ -69,6 +78,7 @@ class DynamicEngineService:
         self._metric_sums = {key: 0.0 for key in PERFORMANCE_KEYS}
         self._metric_counts = {key: 0 for key in PERFORMANCE_KEYS}
         self._completed_requests = 0
+        self._tpot_values: list[float] = []
 
         self._last_snapshot_at = 0.0
         self._snapshot_lock = Lock()
@@ -84,7 +94,7 @@ class DynamicEngineService:
             name="tinyinfer-engine",
             daemon=True,
         )
-        self._thread.start()
+        self._thread.start() # 开启_worker_loop线程
 
     def stop(self) -> None:
         self._stop.set()
@@ -173,8 +183,11 @@ class DynamicEngineService:
             value = statistics.get(key)
             if value is None:
                 continue
-            self._metric_sums[key] += float(value)
+            numeric = float(value)
+            self._metric_sums[key] += numeric
             self._metric_counts[key] += 1
+            if key == "tpot":
+                self._tpot_values.append(numeric)
 
     def _performance_snapshot(self) -> dict:
         averages = {}
@@ -186,9 +199,15 @@ class DynamicEngineService:
         return {
             "completed_requests": self._completed_requests,
             "averages": averages,
+            # 所有已完成 seq 的 request-level TPOT 分布
+            "tpot_percentiles": {
+                "p50": _percentile(self._tpot_values, 0.50),
+                "p95": _percentile(self._tpot_values, 0.95),
+                "p99": _percentile(self._tpot_values, 0.99),
+            },
         }
 
-    def _emit_runtime_snapshot(self, force: bool = False) -> None:
+    def _emit_runtime_snapshot(self, force: bool = False) -> None: # 输出当前runtime的状态快照, 包括resource和perf
         now = time.perf_counter()
         if not force and now - self._last_snapshot_at < self.snapshot_interval_s:
             return
@@ -232,7 +251,7 @@ class DynamicEngineService:
 
             if update.finished:
                 any_finished = True
-                self._record_statistics(update.statistics)
+                self._record_statistics(update.statistics) # 记录全局的perf statistics
                 self._emit(
                     RuntimeEvent(
                         type="finished",
@@ -283,7 +302,7 @@ class DynamicEngineService:
                     raise RuntimeError(
                         "scheduler made no progress while requests remain"
                     )
-                any_finished = self._handle_updates(updates)
+                any_finished = self._handle_updates(updates) # 检查是否有seq请求推理完毕; 刷新全局perf statistics
                 self._emit_runtime_snapshot(force=any_finished)
             except Exception as exc:
                 self._fail_active_requests(str(exc))

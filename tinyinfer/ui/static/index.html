@@ -38,14 +38,20 @@
           </div>
 
           <div class="kv-head">
-            <div>
+            <div class="kv-summary-wrap">
               <div class="section-label">KV cache blocks</div>
+              <!-- [MOD] block数量与单block容量拆成两行，给右侧三态图例留足空间。 -->
               <div class="subtle" id="kv-summary">Waiting for runtime snapshot</div>
+              <div class="subtle kv-block-size" id="kv-block-size">-- / block</div>
             </div>
-            <div class="kv-key"><span class="swatch allocated"></span>allocated <span class="swatch available"></span>available</div>
+            <!-- [MOD] 三态图例固定为单行。 -->
+            <div class="kv-key">
+              <span class="kv-key-item"><span class="swatch block-empty"></span>empty</span>
+              <span class="kv-key-item"><span class="swatch block-cached"></span>cached</span>
+              <span class="kv-key-item"><span class="swatch block-active"></span>active</span>
+            </div>
           </div>
           <div class="block-grid" id="block-grid"></div>
-          <div class="resource-note">Reserved is captured before KV pool creation. Allocated / available show the logical Paged KV block state.</div>
         </section>
 
         <section class="stats-section performance-section">
@@ -54,6 +60,13 @@
             <div class="request-count" id="completed-requests">0 completed</div>
           </div>
           <div class="performance-grid" id="performance-grid"></div>
+          <!-- [MOD] 全局 TPOT 分位数：对所有已完成请求的 request-level TPOT 取分位数。 -->
+          <div class="percentile-head">TPOT percentiles</div>
+          <div class="percentile-grid" id="performance-tpot-percentiles">
+            <div class="metric-card"><span>P50</span><strong data-tpot-percentile="p50">--</strong></div>
+            <div class="metric-card"><span>P95</span><strong data-tpot-percentile="p95">--</strong></div>
+            <div class="metric-card"><span>P99</span><strong data-tpot-percentile="p99">--</strong></div>
+          </div>
         </section>
       </section>
 

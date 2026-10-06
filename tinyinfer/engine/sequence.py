@@ -6,6 +6,15 @@ import time
 from tinyinfer.sampling_params import SamplingParams
 
 
+# 计算单条请求内部 ITL 的分位数。
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round((len(ordered) - 1) * q)
+    return ordered[index]
+
+
 class SequenceStatus(Enum):
     WAITING = auto()   # 已进入引擎，等待 Scheduler 调度
     RUNNING = auto()   # 正在参与 prefill / decode
@@ -198,6 +207,10 @@ class Sequence:
         mean_itl = sum(itls) / len(itls) if itls else None
         min_itl = min(itls) if itls else None
         max_itl = max(itls) if itls else None
+        # User panel 显示上一条请求内部的 TPOT/ITL 分位数。
+        tpot_p50 = _percentile(itls, 0.50)
+        tpot_p95 = _percentile(itls, 0.95)
+        tpot_p99 = _percentile(itls, 0.99)
 
         # steady-state decode throughput
         decode_throughput = None
@@ -225,6 +238,9 @@ class Sequence:
             "service_time": service_time,
             "e2e_latency": e2e_latency,
             "tpot": tpot,
+            "tpot_p50": tpot_p50,
+            "tpot_p95": tpot_p95,
+            "tpot_p99": tpot_p99,
             "mean_itl": mean_itl,
             "min_itl": min_itl,
             "max_itl": max_itl,

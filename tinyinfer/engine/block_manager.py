@@ -30,6 +30,20 @@ class Block:
 
 
 
+def block_state(self, block_id):
+    block = self.blocks[block_id]
+
+    if block.ref_count > 0:
+        return "active"
+
+    if block.hash is not None:
+        return "cached"
+
+    return "empty"
+
+
+
+
 # 所有Block的管理池
 # 最重要的两个数据: free_lru, hash_to_block_ids
 # 所有block只有两个状态: persistent(ref_count = 0, 包含初始态) 和 active (ref_count > 0)

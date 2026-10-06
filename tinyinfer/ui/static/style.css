@@ -13,6 +13,7 @@
   --reserved: #c55b3d;
   --allocated: #e59a58;
   --available: #54b985;
+  --cached: #6ea8fe; /* [MOD] cached-free KV block */
 }
 
 * { box-sizing: border-box; }
@@ -38,9 +39,11 @@ button, textarea, input { font: inherit; }
 
 .users {
   min-height: 0;
-  display: grid;
-  grid-template-rows: repeat(3, minmax(0, 1fr));
+  overflow-y: auto; /* [MOD] 左侧 User 区域独立滚动。 */
+  display: flex;
+  flex-direction: column;
   gap: 14px;
+  padding-right: 4px;
 }
 
 .side {
@@ -60,10 +63,12 @@ button, textarea, input { font: inherit; }
 }
 
 .user-panel {
-  padding: 14px;
+  flex: 0 0 auto; /* [MOD] 不再被三等分压缩。 */
+  min-height: 550px; /* [MOD] panel整体略收紧，output本身改为固定高度。 */
+  padding: 16px;
   display: grid;
-  grid-template-rows: auto minmax(70px, 1fr) auto;
-  gap: 10px;
+  grid-template-rows: auto 190px auto; /* [MOD] output行固定高度，生成内容不会撑高panel。 */
+  gap: 12px;
 }
 
 .panel-head,
@@ -91,10 +96,33 @@ button, textarea, input { font: inherit; }
   font-size: 11px;
 }
 
-.status.busy { color: #9ab5ff; }
+.status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.status.idle {
+  color: #7bd99a;
+  background: rgba(84, 185, 133, .10);
+  border: 1px solid rgba(84, 185, 133, .24);
+}
+.status.busy {
+  color: #f0aa68;
+  background: rgba(229, 154, 88, .10);
+  border: 1px solid rgba(229, 154, 88, .25);
+}
 
 .output {
-  overflow-y: auto;
+  height: 190px; /* [MOD] 固定输出框高度。 */
+  min-height: 190px;
+  max-height: 190px;
+  overflow-y: auto; /* [MOD] 长输出仅在框内滚动。 */
+  overscroll-behavior: contain;
   padding: 12px 14px;
   border: 1px solid #232936;
   border-radius: 13px;
@@ -107,22 +135,22 @@ button, textarea, input { font: inherit; }
 
 .user-lower {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(310px, .95fr);
+  grid-template-columns: minmax(0, 1.18fr) minmax(400px, 1.05fr);
   gap: 10px;
   align-items: stretch;
 }
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 66px;
   gap: 9px;
   align-items: end;
 }
 
 textarea {
   width: 100%;
-  min-height: 84px;
-  max-height: 118px;
+  min-height: 126px; /* [MOD] 左侧可滚动后适当增高输入框。 */
+  max-height: 190px;
   resize: vertical;
   border: 1px solid #2b3240;
   border-radius: 13px;
@@ -159,8 +187,15 @@ button:disabled { cursor: default; opacity: .38; }
 
 .user-tools {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
-  gap: 8px;
+  /* [MOD] Controller优先获得横向空间，Last Request固定为更窄的300px。 */
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.request-controls,
+.user-statistics {
+  min-width: 0;
 }
 
 .mini-panel {
@@ -182,8 +217,8 @@ button:disabled { cursor: default; opacity: .38; }
 
 .control-row {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) 42px;
-  gap: 7px;
+  grid-template-columns: 66px minmax(0, 1fr) 40px;
+  gap: 4px;
   align-items: center;
   margin-top: 8px;
   color: #aeb7c6;
@@ -198,6 +233,7 @@ button:disabled { cursor: default; opacity: .38; }
 
 input[type="range"] {
   width: 100%;
+  min-width: 0; /* [MOD] 允许range在grid单元内正确收缩，不向右溢出。 */
   accent-color: #aabaf0;
 }
 
@@ -250,17 +286,38 @@ input:disabled { opacity: .42; }
 .switch input:disabled + .slider-toggle { opacity: .42; }
 
 .user-stat-grid {
-  margin-top: 8px;
+  margin-top: 9px;
   display: grid;
-  gap: 7px;
+  gap: 8px;
+}
+
+.user-stat-row {
+  display: grid;
+  gap: 12px;
+}
+
+.user-stat-row.single {
+  grid-template-columns: 1fr;
+}
+
+.user-stat-row.pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .user-stat {
+  min-width: 0;
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
   gap: 8px;
   font-size: 10px;
   color: #949eae;
+  white-space: nowrap;
+}
+
+.user-stat span,
+.user-stat strong {
+  white-space: nowrap;
 }
 
 .user-stat strong {
@@ -339,8 +396,33 @@ input:disabled { opacity: .42; }
   flex: 0 0 auto;
 }
 
-.kv-head { margin-top: 13px; }
-.kv-key { display: flex; align-items: center; gap: 5px; }
+.kv-head {
+  margin-top: 13px;
+  align-items: flex-start; /* [MOD] 左侧两行summary与右侧单行legend独立排布。 */
+}
+.kv-summary-wrap {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.kv-block-size {
+  margin-top: 2px; /* [MOD] xx MB / block固定放到下一行。 */
+}
+.kv-key {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap; /* [MOD] empty/cached/active始终保持一行。 */
+  white-space: nowrap;
+}
+.kv-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.block-empty { background: var(--available); } /* [MOD] */
+.block-cached { background: var(--cached); } /* [MOD] */
+.block-active { background: var(--allocated); } /* [MOD] */
 
 .block-grid {
   margin-top: 8px;
@@ -359,12 +441,12 @@ input:disabled { opacity: .42; }
   aspect-ratio: 1;
   min-width: 0;
   border-radius: 1px;
-  background: var(--available);
-  opacity: .83;
+  opacity: .88;
 }
-.kv-block.active { background: var(--allocated); opacity: 1; }
+.kv-block.empty { background: var(--available); } /* [MOD] 从未分配 */
+.kv-block.cached { background: var(--cached); } /* [MOD] cached-free */
+.kv-block.active { background: var(--allocated); opacity: 1; } /* [MOD] active */
 
-.resource-note { margin-top: 7px; line-height: 1.35; }
 
 .performance-grid {
   margin-top: 10px;
@@ -396,6 +478,22 @@ input:disabled { opacity: .42; }
   font-variant-numeric: tabular-nums;
 }
 
+.percentile-head {
+  margin-top: 12px; /* [MOD] */
+  color: #9ba6b6;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.percentile-grid {
+  margin-top: 7px; /* [MOD] */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
 .controller { padding: 16px; }
 .controller-grid {
   margin-top: 14px;
@@ -416,8 +514,17 @@ input:disabled { opacity: .42; }
 
 @media (max-width: 1250px) {
   .user-lower { grid-template-columns: 1fr; }
-  .user-tools { grid-template-columns: 1fr 1fr; }
-  .output { min-height: 90px; }
+  .user-tools { grid-template-columns: minmax(0, 1fr) 300px; } /* [MOD] */
+  .output {
+    height: 180px; /* [MOD] 窄屏下仍保持固定高度。 */
+    min-height: 180px;
+    max-height: 180px;
+  }
+}
+
+@media (max-width: 720px) {
+  .user-tools { grid-template-columns: 1fr; }
+  .user-statistics { width: 100%; max-width: none; }
 }
 
 @media (max-width: 980px) {
@@ -428,4 +535,15 @@ input:disabled { opacity: .42; }
   .users { grid-template-rows: repeat(3, auto); }
   .user-panel { min-height: 430px; }
   .side { grid-template-rows: auto 145px; }
+}
+/* Keep user request controls compact so Last request metrics remain single-line. */
+.start-button {
+  width: 66px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.user-statistics {
+  width: 300px; /* [MOD] Last Request整体收窄并固定，不再挤压Controller。 */
+  max-width: 300px;
 }

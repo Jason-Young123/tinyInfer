@@ -88,8 +88,8 @@ def create_app(
             service.stop()
             broadcaster.cancel()
 
-    app = FastAPI(title="tinyInfer UI", lifespan=lifespan)
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app = FastAPI(title="tinyInfer UI", lifespan=lifespan) # 用FastAPI创建app
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static") # 指向构建网页app的static目录
 
     @app.get("/")
     async def index():
