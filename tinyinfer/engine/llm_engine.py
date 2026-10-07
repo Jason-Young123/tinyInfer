@@ -20,7 +20,7 @@ class StreamUpdate:
 
 # 整体调用链条: LLM -> LLMEngine -> 创建seqs列表 -> Scheduler -> ModelRunner
 class LLMEngine:
-    def __init__(self, config: Config | None = None, device: str = "cuda"):
+    def __init__(self, config: Config | None = None, device: str = "cuda", dtype=torch.bfloat16):
         self.config = config or Config()
         self.config.validate_runtime_fields()
         self.config.load_hf_config()
@@ -29,7 +29,7 @@ class LLMEngine:
 
         # ModelRunner 先初始化，因为它会根据真实模型显存占用计算config.num_kvcache_blocks;
         # 随后 Scheduler/BlockManager 才能使用该值。
-        self.model_runner = ModelRunner(self.config, device=device)
+        self.model_runner = ModelRunner(self.config, device=device, dtype=dtype)
         self.scheduler = Scheduler(self.config)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model, trust_remote_code=True)
@@ -39,7 +39,7 @@ class LLMEngine:
 
     def add_request(self, token_ids: list[int], params: SamplingParams): # 简化后的创建请求函数, 用一个token list代表
         seq = Sequence(token_ids, params)
-        self.scheduler.add(seq)
+        self.scheduler.add(seq) # 进入waiting_list
         return seq.seq_id
  
     def build_chat_prompt(self, text:str, system_prompt:str|None = None) -> str:
@@ -56,7 +56,7 @@ class LLMEngine:
         return text
 
     # 把 UI 字符串转换成真正 chat-template prompt, 再进入原 Scheduler; 等价于generate函数中的把prompt转化为token id的步骤
-    def add_text_request(
+    def add_text_request( # 创建seq的同时记录arrival_time
         self,
         text: str,
         params: SamplingParams,

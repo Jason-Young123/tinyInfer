@@ -49,7 +49,7 @@ class Sequence:
         self.last_block_hash: int = 0           # 最近一个满block对应的hash code
 
         # performance
-        self.arrival_time = time.perf_counter() # 创建seq的时间戳
+        self.arrival_time = time.perf_counter() # 创建seq的时间戳; seq对象创建时即记录arrival_time
         self.first_scheduled_time: float | None = None # 第一次被调度的时间戳
         self.first_token_time: float | None = None # TTFT
         self.finished_time: float | None = None
@@ -125,7 +125,7 @@ class Sequence:
         now = time.perf_counter()
         if self.first_token_time is None:
             self.first_token_time = now
-        self.output_token_times.append(now)
+        self.output_token_times.append(now) # 同步计时
 
     def mark_finished(self) -> None:
         self.status = SequenceStatus.FINISHED

@@ -1,6 +1,6 @@
 import argparse
-
 import uvicorn
+import torch
 
 from tinyinfer import LLM
 from tinyinfer.config import Config
@@ -29,7 +29,7 @@ def main():
         kvcache_block_size=16,
         gpu_memory_utilization=0.80,
     )
-    engine = LLM(config)
+    engine = LLM(config, device="cuda", dtype=torch.bfloat16) # 显式注明device和dtype
     service = DynamicEngineService(engine, snapshot_interval_s=0.25)
     app = create_app(service)
     uvicorn.run(app, host=args.host, port=args.port)

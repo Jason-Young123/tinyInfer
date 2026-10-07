@@ -37,7 +37,7 @@ def flash_attention(
     k = k.contiguous()
     v = v.contiguous()
 
-    return _load_extension().flash_attention_forward(
+    return _load_extension().flash_attention_forward( # 调用由注册flash_attention_bind.cpp注册的函数名
         q,
         k,
         v,
