@@ -162,7 +162,7 @@ class ModelRunner:
 
 
 
-    # 对多个seq准备prefill workload
+    # 对多个seq准备prefill workload; deprecated
     # 假设一个batch包含3个prefill请求, seq0 = [A, B, C, D, | E, F], seq1 = [a, b, | c, d], seq2 = [|1, 2, 3]; (|右侧代表尚未进入prefix cache的部分)
     # 则执行完prepare_prefill之后:
     #  input_ids = [E, F, c, d, 1, 2, 3]
@@ -215,7 +215,7 @@ class ModelRunner:
         )
         return input_ids, positions
 
-    # 对多个seq准备decode workload
+    # 对多个seq准备decode workload; deprecated
     # 假设一个batch同样包含3个decode请求, seq0 = [A, B, C], seq1 = [a, b, c, d], seq2 = [1, 2];
     # 则执行完prepare_docode之后(假设block_size = 2):
     #  input_ids = [C, d, 2]

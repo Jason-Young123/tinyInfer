@@ -1,6 +1,10 @@
 import torch
 from torch import nn
 
+
+TOP_K = 100  # 暂时使用全局top-k参数, 后续可接入UI
+
+
 # 支持同一个 mixed batch 中每条请求独立 greedy/temperature
 class Sampler(nn.Module): # shape变化: [sampled_seq, vocab_size] -> [sampled_seq], 即每个需要进行sample的seq请求最终采样到哪一个token
     def forward(
@@ -40,6 +44,12 @@ class Sampler(nn.Module): # shape变化: [sampled_seq, vocab_size] -> [sampled_s
 
             # 基于Gumbel-max的softmax-free采样
             scaled = (logits[sample_mask] / temps.unsqueeze(-1)).float()
+            # top-k
+            k = min(TOP_K, scaled.shape[-1])
+            topk_values = torch.topk(scaled, k=k, dim=-1).values
+            threshold = topk_values[:, -1].unsqueeze(-1)
+            scaled = scaled.masked_fill(scaled < threshold, float("-inf"))
+
             u = torch.rand_like(scaled).clamp_min_(1e-10) # U ~ Uniform(0, 1); 因为rand_like生成的范围是[0, 1)而非(0, 1), 故要用clamp约束下界
             gumbel = -torch.log(-torch.log(u)) # G ~ Gumbel(0, 1)
             result[sample_mask] = (scaled + gumbel).argmax(dim=-1) # Gumbel-Max sampling
