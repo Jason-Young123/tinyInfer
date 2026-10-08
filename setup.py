@@ -10,8 +10,9 @@ setup(
         CUDAExtension(
             name="tinyinfer._C",
             sources=[
-                "tinyinfer/csrc/flash_attention_bind.cpp", # 注意这里需要用相对路径
+                "tinyinfer/csrc/bind.cpp",
                 "tinyinfer/csrc/flash_attention.cu",
+                "tinyinfer/csrc/flash_decoding.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
@@ -23,5 +24,3 @@ setup(
         "build_ext": BuildExtension,
     },
 )
-
-

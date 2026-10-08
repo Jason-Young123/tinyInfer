@@ -13,5 +13,10 @@ dist/
 # Virtual environment
 .venv/
 
+# Compiled shared libraries
+*.so
+
 # Others
 useless/
+
+

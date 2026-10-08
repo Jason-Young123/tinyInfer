@@ -5,6 +5,7 @@ from torch import nn
 from tinyinfer.utils.context import get_context
 
 from tinyinfer.layers.flash_attention import flash_attention # self-implemented flash attention
+from tinyinfer.layers.flash_decoding import flash_decoding   # self-implemented flash decoding
 
 # 一些独立的辅助函数
 def store_kv(
@@ -101,6 +102,37 @@ class PagedKVCache(nn.Module):
         return self.storage[layer_idx, 0], self.storage[layer_idx, 1]
 
 
+
+
+"""
+attention backend选择链:
+
+forward
+  |
+  +-- store_kv
+  |
+  +-- backend == flash
+  |      |
+  |      +-- _flash_attend_uniform
+  |             |
+  |             +-- q_len == 1
+  |             |      -> flash_decoding
+  |             |      -> 直接访问paged KV
+  |             |
+  |             +-- q_len > 1
+  |                    -> gather_sequence_kv
+  |                    -> flash_attention
+  |
+  +-- backend == torch
+         |
+         +-- _torch_attend_uniform
+                -> gather_sequence_kv
+                -> SDPA
+"""
+
+
+
+
 _FLASH_LOGGED = False
 _TORCH_LOGGED = False
 
@@ -149,31 +181,40 @@ class Attention(nn.Module):
         else:
             return k, v
 
+    # backend = torch同一入口: 内部全部调用SPDA实现
     # unified attention computation
-    def _attend_one(self, q_i, k_hist, v_hist, query_start_pos: int):
+    def _torch_attend_uniform(
+        self,
+        q_i: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        block_table: torch.Tensor,
+        context_len: int,
+        query_start_pos: int,
+    ):
         # q_i:    [Tq, Hq, D] = [q_len, num_q_heads, hidden_dim]
-        # k_hist: [Tk, Hkv, D] = [kv_len/kv_cache_len, num_kv_heads, hidden_dim]
+        # cache_k: [num_blocks, block_size, num_kv_heads, hidden_dim]
+        # cache_v: [num_blocks, block_size, num_kv_heads, hidden_dim]
 
-        # backend选择为 FlashAttention 时, 直接处理原始 GQA heads 与 query_start_pos
-        if self.backend == "flash":
-            global _FLASH_LOGGED
-            if not _FLASH_LOGGED: # 打印backend
-                print("[tinyInfer] Attention backend: self-implemented flash attention")
-                _FLASH_LOGGED = True
-            
-            return flash_attention(
-                q_i,
-                k_hist,
-                v_hist,
-                query_start_pos=query_start_pos,
-                scale=self.scale,
-                is_causal=True
-            )
-        
         global _TORCH_LOGGED
         if not _TORCH_LOGGED: # 打印backend
             print("[tinyInfer] Attention backend: torch.scaled_dot_product_attention")
             _TORCH_LOGGED = True
+
+        # 在torch backend内部materialize当前sequence对应的连续历史K/V
+        k_hist = gather_sequence_kv(
+            cache_k,
+            block_table,
+            context_len,
+            self.block_size,
+        ) # [Tk, Hkv, D] = [kv_len/kv_cache_len, num_kv_heads, hidden_dim]
+
+        v_hist = gather_sequence_kv(
+            cache_v,
+            block_table,
+            context_len,
+            self.block_size,
+        ) # [Tk, Hkv, D] = [kv_len/kv_cache_len, num_kv_heads, hidden_dim]
 
         q = q_i.transpose(0, 1).unsqueeze(0)    # [1, num_q_heads, q_len, hidden_dim]
         k = k_hist.transpose(0, 1).unsqueeze(0) # [1, num_kv_heads, kv_cache_len, hidden_dim]
@@ -193,7 +234,7 @@ class Attention(nn.Module):
 
         causal = k_pos.unsqueeze(0) <= q_pos.unsqueeze(1) # shape = [5, 10]
         # shape = [1, 1, 5, 10] = [Batch, heads/q_heads, q_len, kv_cache_len], 用于后续attention计算时自动广播对齐
-        causal = causal.unsqueeze(0).unsqueeze(0) 
+        causal = causal.unsqueeze(0).unsqueeze(0)
 
         out = torch.nn.functional.scaled_dot_product_attention( # [1, num_q_heads, q_len, hidden_dim]
             q,                  # [1, num_q_heads, q_len, hidden_dim]
@@ -203,7 +244,106 @@ class Attention(nn.Module):
             is_causal=False,    # 不需要torch自动计算mask
             scale=self.scale,
         )
+
         return out.squeeze(0).transpose(0, 1) # [q_len, num_q_heads, hidden_dim]
+
+
+
+    # backend = flash条件下 q_len > 1专用
+    def _flash_attend_prefill(self, q_i, k_hist, v_hist, query_start_pos: int):
+        # q_i:    [Tq, Hq, D]
+        # k_hist: [Tk, Hkv, D]
+        return flash_attention(
+            q_i,
+            k_hist,
+            v_hist,
+            query_start_pos=query_start_pos,
+            scale=self.scale,
+            is_causal=True,
+        )
+
+
+
+    # backend = flash条件下 q_len=1专用，不materialize历史连续K/V
+    def _flash_attend_decode_one(
+        self,
+        q_i: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        block_table: torch.Tensor,
+        context_len: int,
+    ) -> torch.Tensor:
+        if q_i.shape[0] != 1:
+            raise ValueError("_attend_decode_one requires q_len == 1")
+        return flash_decoding(
+            q=q_i,
+            k_cache=cache_k,
+            v_cache=cache_v,
+            block_table=block_table,
+            context_len=context_len,
+            kvcache_block_size=self.block_size,
+            scale=self.scale,
+        )
+
+
+    # backend = flash统一入口:
+    # q_len > 1 -> FlashAttention
+    # q_len = 1 -> Paged Flash-Decoding
+    def _flash_attend_uniform(
+        self,
+        q_i: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        block_table: torch.Tensor,
+        context_len: int,
+        query_start_pos: int,
+    ) -> torch.Tensor:
+        global _FLASH_LOGGED
+        if not _FLASH_LOGGED: # 打印backend
+            print("[tinyInfer] Attention backend: self implemented flash attention/decoding")
+            _FLASH_LOGGED = True
+
+        # q_i: [Tq, Hq, D]
+        q_len = q_i.shape[0]
+
+        # decode: q_len = 1，直接读取paged KV cache，不materialize连续K/V
+        if q_len == 1:
+            return flash_decoding(
+                q=q_i,
+                k_cache=cache_k,
+                v_cache=cache_v,
+                block_table=block_table,
+                context_len=context_len,
+                kvcache_block_size=self.block_size,
+                scale=self.scale,
+            )
+
+        # prefill/chunked prefill: q_len > 1，暂时仍materialize连续历史K/V
+        k_hist = gather_sequence_kv(
+            cache_k,
+            block_table,
+            context_len,
+            self.block_size,
+        )
+
+        v_hist = gather_sequence_kv(
+            cache_v,
+            block_table,
+            context_len,
+            self.block_size,
+        )
+
+        return flash_attention(
+            q_i,
+            k_hist,
+            v_hist,
+            query_start_pos=query_start_pos,
+            scale=self.scale,
+            is_causal=True,
+        )
+
+
+
 
     # interface
     def forward(self, q, k, v): # q/k/v shape: [num_tokens, num_heads/num_kv_heads, head_dim], 这里代表刚刚乘过Wq/k/v的向量
@@ -223,7 +363,7 @@ class Attention(nn.Module):
         cu_q = ctx.cu_seqlens_q.tolist()
         outputs = []
 
-        for i in range(len(cu_q) - 1): # 对这一轮所有需要处理的seq请求逐一调用_attent_one进行attention计算
+        for i in range(len(cu_q) - 1): # 对这一轮所有需要处理的seq请求逐一调用attention计算
             qs, qe = cu_q[i], cu_q[i + 1]
             q_i = q[qs:qe]
 
@@ -231,26 +371,34 @@ class Attention(nn.Module):
             q_len = qe - qs
             query_start = context_len - q_len
 
-            k_hist = gather_sequence_kv(
-                cache_k,
-                ctx.block_tables[i],
-                context_len,
-                self.block_size,
-            )
-            v_hist = gather_sequence_kv(
-                cache_v,
-                ctx.block_tables[i],
-                context_len,
-                self.block_size,
-            )
-
-            outputs.append(
-                self._attend_one(
-                    q_i,
-                    k_hist,
-                    v_hist,
+            # flash backend:
+            # q_len > 1 -> gather连续K/V后进入FlashAttention
+            # q_len = 1 -> 直接进入Paged Flash-Decoding, 不materialize连续K/V
+            if self.backend == "flash":
+                out_i = self._flash_attend_uniform(
+                    q_i=q_i,
+                    cache_k=cache_k,
+                    cache_v=cache_v,
+                    block_table=ctx.block_tables[i],
+                    context_len=context_len,
                     query_start_pos=query_start,
                 )
-            )
+
+            # torch backend:
+            # 始终在backend内部gather连续K/V后进入SDPA
+            elif self.backend == "torch":
+                out_i = self._torch_attend_uniform(
+                    q_i=q_i,
+                    cache_k=cache_k,
+                    cache_v=cache_v,
+                    block_table=ctx.block_tables[i],
+                    context_len=context_len,
+                    query_start_pos=query_start,
+                )
+
+            else:
+                raise ValueError(f"unsupported attention backend: {self.backend}")
+
+            outputs.append(out_i)
 
         return torch.cat(outputs, dim=0) # shape = [num_total_tokens, num_heads, head_dim]
