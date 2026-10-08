@@ -274,7 +274,7 @@ class BlockManager:
                 prev_hash = block_hash
                 continue
 
-            # 当前物理块理论上在这一刻第一次“内容稳定”; 如果此前有其他 cache identity，先清旧索引。
+            # 当前物理块理论上在这一刻第一次“内容稳定”; 如果此前有其他 cache identity，先清旧索引
             self._remove_cache_index(block)
             block.bind(token_ids, block_hash, prev_hash) # 正式绑定
             self.hash_to_block_ids.setdefault(block_hash, set()).add(block_id) # 原本仅删除就记录, 此时写入新记录

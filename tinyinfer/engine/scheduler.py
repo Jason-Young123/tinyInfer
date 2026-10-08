@@ -209,7 +209,7 @@ class Scheduler:
         for item in output.items:
             seq = item.seq
         
-            # 1. 本轮 scheduled token 的 KV 已经完成。
+            # 1. 本轮 scheduled token 的 KV 已经完成
             seq.num_computed_tokens += item.num_tokens
             seq.num_scheduled_tokens = 0
 
@@ -223,7 +223,7 @@ class Scheduler:
                 token_id = sampled_tokens[seq.seq_id]
                 seq.append_token(token_id) # 这里让num_tokens + 1, 但num_computed_tokens没变
 
-            # 4. 采样后检查停止条件。
+            # 4. 采样后检查停止条件
             if seq.should_stop(self.eos_token_id, self.max_model_len):
                 #seq.status = SequenceStatus.FINISHED
                 seq.mark_finished()
