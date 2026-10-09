@@ -15,7 +15,7 @@ The current implementation supports Qwen3 models and includes:
 ### Attention Backends
 - GQA / MQA
 - PyTorch SDPA attention backend
-- Self-implemented CUDA FlashAttention backend
+- Self-implemented CUDA FlashAttention/FlashDecoding backend
 
 ### Observability & Web UI
 - Runtime performance statistics
