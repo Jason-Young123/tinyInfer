@@ -42,17 +42,19 @@ def bytes_per_kv_block(hf_config, block_size: int, dtype: torch.dtype) -> int:
     )
 
 
-# Resource Statistics 统一采用同一套预算口径，四部分严格相加等于 GPU 总显存：
-# Unused：TOTAL_MEM * (1 - gpu_memory_utilization)，策略上完全不使用的预留区域，灰色。
-# Reserved：模型加载完成、KV pool 创建之前 torch.cuda.memory_reserved() 的值，包含 weights 在内的 PyTorch reserved memory，深橘色。
-# Allocated：当前 `ref_count > 0` 的 KV blocks 总容量，浅橘色
-# Available：KV 预算中尚未被 active block 占用的容量，绿色
+# Resource Statistics 统一采用同一套预算口径，五部分严格相加等于 GPU 总显存：
+# Reserved: TOTAL_MEM * (1 - gpu_memory_utilization), 完全不使用的预留区域
+# Weights: 模型权重
+# Temporary Peak: 一次最大token数prefill过程中temporary activation所占用的总显存(不包含KV cache)
+# KV budget: 包含Allocated和Available, 分别代表KV cache已经占用和还可以占用的显存大小
+# Reserved + Weights + Temporary Peak + Allocated for KV + Available for KV = TOTAL_MEM
 @dataclass(frozen=True, slots=True)
 class KVMemoryProfile:
     total_bytes: int
     budget_bytes: int
-    unused_bytes: int
     reserved_bytes: int
+    weights_bytes: int
+    temporary_peak_bytes: int
     block_bytes: int
     num_blocks: int
 
@@ -62,33 +64,79 @@ def build_kv_memory_profile(
     config,
     device: torch.device,
     dtype: torch.dtype,
+    model
 ) -> KVMemoryProfile:
     if device.type != "cuda":
         raise ValueError("Invalid device: cpu; Required: cuda")
+    from transformers import AutoTokenizer
 
     # 清掉 allocator 中可释放的历史缓存后再做 KV profile。
     torch.cuda.synchronize(device)
     torch.cuda.empty_cache()
-
     total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
     budget_bytes = int(total_bytes * config.gpu_memory_utilization)
-    unused_bytes = total_bytes - budget_bytes
-    reserved_bytes = int(torch.cuda.memory_reserved(device))
+    reserved_bytes = total_bytes - budget_bytes
+    weights_bytes = sum(p.numel() * p.element_size() for p in model.parameters()) 
     block_bytes = bytes_per_kv_block(config.hf_config, config.kvcache_block_size, dtype)
-
     if block_bytes <= 0:
         raise RuntimeError("invalid KV bytes per block")
 
-    kv_budget_bytes = max(0, budget_bytes - reserved_bytes)
+    # 直接把 hello 文本编码为指定长度，不经过 Engine/Scheduler
+    tokenizer = AutoTokenizer.from_pretrained(config.model, trust_remote_code=True)
+    hello_ids = tokenizer.encode("hello", add_special_tokens=False)
+    if not hello_ids:
+        raise RuntimeError("hello tokenizer returned no tokens")
+
+    # 创建dummy input和dummy pagedKVCache
+    n = config.max_num_batched_tokens
+    ids = (hello_ids * ((n + len(hello_ids) - 1) // len(hello_ids)))[:n]
+    input_ids = torch.tensor(ids, dtype=torch.long, device=device)
+    positions = torch.arange(n, dtype=torch.long, device=device)
+    num_dummy_blocks = (n + config.kvcache_block_size - 1) // config.kvcache_block_size
+    head_dim = int(getattr(config.hf_config, "head_dim", config.hf_config.hidden_size // config.hf_config.num_attention_heads))
+    dummy_cache = PagedKVCache( 
+        num_layers=config.hf_config.num_hidden_layers,
+        num_blocks=num_dummy_blocks, 
+        block_size=config.kvcache_block_size,
+        num_kv_heads=config.hf_config.num_key_value_heads, 
+        head_dim=head_dim, dtype=dtype, device=device, 
+    ) 
+    dummy_kv_bytes = dummy_cache.size()
+    model.set_kv_cache(dummy_cache) 
+
+    try: # 直接跑一次forward
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device) 
+        with torch.inference_mode(): 
+            set_context( 
+                cu_seqlens_q=torch.tensor([0, n], dtype=torch.int32, device=device), 
+                context_lens=torch.tensor([n], dtype=torch.int32, device=device),
+                block_tables=torch.arange(num_dummy_blocks, dtype=torch.int32, device=device).unsqueeze(0), 
+                slot_mapping=torch.arange(n, dtype=torch.long, device=device),
+            ) 
+            model(input_ids, positions, output_hidden_states=False) 
+        torch.cuda.synchronize(device) 
+        profile_peak_bytes = int(torch.cuda.max_memory_allocated(device)) 
+    finally: 
+        reset_context() 
+        for layer in model.model.layers: 
+            layer.self_attn.attn.kv_cache = None 
+        del dummy_cache, input_ids, positions 
+        torch.cuda.empty_cache() 
+
+    
+    temporary_peak_bytes = max(0, profile_peak_bytes - weights_bytes - dummy_kv_bytes) # 注意peak应该减去weights和dummy cache大小
+    kv_budget_bytes = budget_bytes - weights_bytes - temporary_peak_bytes
     num_blocks = kv_budget_bytes // block_bytes
     if num_blocks <= 0:
-        raise RuntimeError("no memory left for KV cache under gpu_memory_utilization")
-
+        raise RuntimeError("no memory left for KV cache after dummy prefill profiling")
+    
     return KVMemoryProfile(
         total_bytes=total_bytes,
         budget_bytes=budget_bytes,
-        unused_bytes=unused_bytes,
         reserved_bytes=reserved_bytes,
+        weights_bytes=weights_bytes,
+        temporary_peak_bytes=temporary_peak_bytes,
         block_bytes=int(block_bytes),
         num_blocks=int(num_blocks),
     )
@@ -135,7 +183,7 @@ class ModelRunner:
         # step3: 模型参数驻留后再估算KV容量
         #num_blocks = estimate_num_kv_blocks(self.config, self.device, self.dtype)
         #self.config.num_kvcache_blocks = num_blocks
-        self.resource_profile = build_kv_memory_profile(self.config, self.device, self.dtype)
+        self.resource_profile = build_kv_memory_profile(self.config, self.device, self.dtype, self.model)
         num_blocks = self.resource_profile.num_blocks
         self.config.num_kvcache_blocks = num_blocks
         head_dim = int(

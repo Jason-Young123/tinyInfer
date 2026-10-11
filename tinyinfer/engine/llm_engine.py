@@ -103,47 +103,37 @@ class LLMEngine:
     
     # 资源快照只读取 CPU metadata，不做 CUDA synchronize; 仅获取resource快照
     def runtime_resource_snapshot(self) -> dict:
-        device = self.model_runner.device
-        if device.type != "cuda": # cpu端直接忽略
-            return {
-                "total_bytes": 0,
-                "unused_bytes": 0,
-                "reserved_bytes": 0,
-                "allocated_kv_bytes": 0,
-                "available_kv_bytes": 0,
-                "block_bytes": 0,
-                "num_blocks": 0,
-                "active_block_ids": [],
-                "cached_block_ids": []
-            }
-
         profile = self.model_runner.resource_profile
-        total_bytes = profile.total_bytes
-        unused_bytes = profile.unused_bytes
-        reserved_bytes = profile.reserved_bytes
-        block_bytes = profile.block_bytes
+        if profile is None:  
+            return {  
+                "total_bytes": 0,  
+                "reserved_bytes": 0,  
+                "weights_bytes": 0, 
+                "temporary_peak_bytes": 0,  
+                "allocated_kv_bytes": 0, 
+                "available_kv_bytes": 0,  
+                "num_blocks": 0,  
+                "active_block_ids": [],  
+                "cached_block_ids": [],  
+            }  
         blocks = self.scheduler.block_manager.blocks
-        active_block_ids = [
-            block.block_id for block in blocks if block.ref_count > 0
-        ]
-        cached_block_ids = [
-            block.block_id
-            for block in blocks
-            if block.ref_count == 0 and block.hash is not None
-        ]
-        allocated_kv_bytes = len(active_block_ids) * block_bytes
-        available_kv_bytes = max(0, total_bytes - unused_bytes - reserved_bytes - allocated_kv_bytes)
-
+        active_block_ids = [block.block_id for block in blocks if block.ref_count > 0] 
+        cached_block_ids = [block.block_id for block in blocks if block.ref_count == 0 and block.hash is not None] 
+        allocated_kv_bytes = len(active_block_ids) * profile.block_bytes 
+        kv_pool_bytes = profile.num_blocks * profile.block_bytes 
+        available_kv_bytes = profile.total_bytes - profile.reserved_bytes - profile.weights_bytes - profile.temporary_peak_bytes - allocated_kv_bytes
         return {
-            "total_bytes": total_bytes,
-            "unused_bytes": unused_bytes,
-            "reserved_bytes": reserved_bytes,
-            "allocated_kv_bytes": int(allocated_kv_bytes),
-            "available_kv_bytes": int(available_kv_bytes),
-            "block_bytes": int(block_bytes),
+            "total_bytes": profile.total_bytes, # TOTAL_MEM
+            "reserved_bytes": profile.reserved_bytes, # TOTAL_MEM * (1 - utilization)
+            "weights_bytes": profile.weights_bytes, # weights
+            "temporary_peak_bytes": profile.temporary_peak_bytes, # temporary activations
+            "allocated_kv_bytes": allocated_kv_bytes, 
+            "available_kv_bytes": available_kv_bytes, 
+            "kv_pool_bytes": kv_pool_bytes, # allocated + available for kv
+            "block_bytes": profile.block_bytes,
             "num_blocks": len(blocks),
-            "active_block_ids": active_block_ids, # ref_count > 0
-            "cached_block_ids": cached_block_ids # ref_count = 0但曾经被分配过
+            "active_block_ids": active_block_ids, 
+            "cached_block_ids": cached_block_ids, 
         }
 
 

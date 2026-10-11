@@ -37,13 +37,6 @@ python examples/advance02_ui_plus.py \
   --model /path/to/your/qwen3-0.6B/model
 ```
 
-This uses:
-
-```python
-torch.nn.functional.scaled_dot_product_attention
-```
-
-as the attention backend.
 
 ## Run with Self-Implemented FlashAttention
 
@@ -53,7 +46,6 @@ python examples/advance02_ui_plus.py \
   --model /path/to/your/qwen3-0.6B/model
 ```
 
-This uses the custom CUDA FlashAttention implementation built into `tinyinfer._C`.
 
 ## Attention Backend
 

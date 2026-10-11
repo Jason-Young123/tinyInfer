@@ -229,6 +229,7 @@ class Sequence:
             "decode_tokens": decode_tokens, # decode输出总token, = output_tokens - 1
             "total_tokens": total_tokens,
             "cached_tokens": cached_tokens,
+            "cache_hit_rate": cached_tokens / prompt_tokens if prompt_tokens else 0.0,
 
             # latency
             "queue_time": queue_time,

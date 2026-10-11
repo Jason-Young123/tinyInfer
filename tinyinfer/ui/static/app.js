@@ -75,6 +75,9 @@ function makePanel(userId, index) {
             <div class="user-stat-row single">
               <div class="user-stat"><span>E2E</span><strong class="stat-e2e">--</strong></div>
             </div>
+            <div class="user-stat-row single"> <!-- # [MOD] -->
+              <div class="user-stat"><span>Cache Hit Rate</span><strong class="stat-cache-hit-rate">--</strong></div> <!-- # [MOD] -->
+            </div> <!-- # [MOD] -->
           </div>
         </section>
       </div>
@@ -98,6 +101,7 @@ function makePanel(userId, index) {
     statTPOTP95: panel.querySelector(".stat-tpot-p95"), // [MOD]
     statTPOTP99: panel.querySelector(".stat-tpot-p99"), // [MOD]
     statE2E: panel.querySelector(".stat-e2e"),
+    statCacheHitRate: panel.querySelector(".stat-cache-hit-rate"), // # [MOD]
     busy: false,
     outputBase: "",
   };
@@ -203,6 +207,10 @@ function formatMemoryPart(bytes, total) {
   return `${formatBytes(bytes)} · ${percent.toFixed(1)}%`;
 }
 
+function formatRate(value) { // # [MOD]
+  return value == null ? "--" : `${(value * 100).toFixed(1)}%`; // # [MOD]
+} // # [MOD]
+
 function updateUserStatistics(state, statistics) {
   if (!statistics) return;
   state.statTTFT.textContent = formatLatency(statistics.ttft);
@@ -211,6 +219,7 @@ function updateUserStatistics(state, statistics) {
   state.statTPOTP95.textContent = formatLatency(statistics.tpot_p95); // [MOD]
   state.statTPOTP99.textContent = formatLatency(statistics.tpot_p99); // [MOD]
   state.statE2E.textContent = formatSeconds(statistics.e2e_latency);
+  state.statCacheHitRate.textContent = formatRate(statistics.cache_hit_rate); // # [MOD]
 }
 
 function setSegment(id, bytes, total) {
@@ -278,18 +287,21 @@ function updateBlockGrid(numBlocks, activeBlockIds, cachedBlockIds) {
 function updateResource(resource) {
   if (!resource) return;
   const total = resource.total_bytes ?? 0;
-  const unused = resource.unused_bytes ?? 0;
   const reserved = resource.reserved_bytes ?? 0;
+  const weights = resource.weights_bytes ?? 0; // # [MOD]
+  const temporary = resource.temporary_peak_bytes ?? 0; // # [MOD]
   const allocated = resource.allocated_kv_bytes ?? 0;
   const available = resource.available_kv_bytes ?? 0;
 
-  document.querySelector("#mem-unused").textContent = formatMemoryPart(unused, total);
   document.querySelector("#mem-reserved").textContent = formatMemoryPart(reserved, total);
+  document.querySelector("#mem-weights").textContent = formatMemoryPart(weights, total); // # [MOD]
+  document.querySelector("#mem-temporary").textContent = formatMemoryPart(temporary, total); // # [MOD]
   document.querySelector("#mem-allocated").textContent = formatMemoryPart(allocated, total);
   document.querySelector("#mem-available").textContent = formatMemoryPart(available, total);
 
-  setSegment("#segment-unused", unused, total);
   setSegment("#segment-reserved", reserved, total);
+  setSegment("#segment-weights", weights, total); // # [MOD]
+  setSegment("#segment-temporary", temporary, total); // # [MOD]
   setSegment("#segment-allocated", allocated, total);
   setSegment("#segment-available", available, total);
 
@@ -331,6 +343,11 @@ function updatePerformance(performance) {
   }
 
   // [MOD] 全局 TPOT 分位数是所有已完成请求的 request-level TPOT 分布。
+  //document.querySelector("#performance-cache-hit-rate").textContent = formatRate(performance.cache_hit_rate); // # [MOD]
+  const cacheNode = document.querySelector("#performance-cache-hit-rate");
+  if (cacheNode) {
+    cacheNode.textContent = formatRate(performance.cache_hit_rate);
+  }
   const percentiles = performance.tpot_percentiles ?? {};
   for (const key of ["p50", "p95", "p99"]) {
     const node = document.querySelector(`[data-tpot-percentile="${key}"]`);

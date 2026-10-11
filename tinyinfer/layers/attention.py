@@ -100,6 +100,9 @@ class PagedKVCache(nn.Module):
         if not 0 <= layer_idx < self.num_layers:
             raise IndexError("layer_idx out of range")
         return self.storage[layer_idx, 0], self.storage[layer_idx, 1]
+    
+    def size(self) -> int:
+        return self.storage.numel() * self.storage.element_size() 
 
 
 

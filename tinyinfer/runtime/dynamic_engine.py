@@ -79,6 +79,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         self._metric_counts = {key: 0 for key in PERFORMANCE_KEYS}
         self._completed_requests = 0
         self._tpot_values: list[float] = []
+        self._cache_hit_rate_sum = 0.0 
 
         self._last_snapshot_at = 0.0
         self._snapshot_lock = Lock()
@@ -179,6 +180,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         if not statistics:
             return
         self._completed_requests += 1
+        self._cache_hit_rate_sum += float(statistics.get("cache_hit_rate", 0.0)) 
         for key in PERFORMANCE_KEYS:
             value = statistics.get(key)
             if value is None:
@@ -198,6 +200,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
             )
         return {
             "completed_requests": self._completed_requests,
+            "cache_hit_rate": self._cache_hit_rate_sum / self._completed_requests if self._completed_requests else None,
             "averages": averages,
             # 所有已完成 seq 的 request-level TPOT 分布
             "tpot_percentiles": {
@@ -286,7 +289,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                 try:
                     batch = self._commands.get(timeout=0.1)
                 except Empty:
-                    self._emit_runtime_snapshot()
+                    self._emit_runtime_snapshot(force=True)
                     continue
                 if batch is None:
                     continue
@@ -303,7 +306,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                         "scheduler made no progress while requests remain"
                     )
                 any_finished = self._handle_updates(updates) # 检查是否有seq请求推理完毕; 刷新全局perf statistics
-                self._emit_runtime_snapshot(force=any_finished)
+                self._emit_runtime_snapshot(force=True)
             except Exception as exc:
                 self._fail_active_requests(str(exc))
                 self._emit_runtime_snapshot(force=True)

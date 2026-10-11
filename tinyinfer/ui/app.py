@@ -80,8 +80,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.bind_loop()
-        service.start(hub.publish_from_thread)
         broadcaster = asyncio.create_task(hub.broadcast_loop())
+        service.start(hub.publish_from_thread) 
         try:
             yield
         finally:

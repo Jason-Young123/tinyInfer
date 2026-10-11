@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tinyInfer Console</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=advance06">
 </head>
 <body>
   <main class="shell">
@@ -24,17 +24,19 @@
           <div class="section-title">Resource statistics</div>
 
           <div class="memory-bar" id="memory-bar" aria-label="GPU memory budget composition">
-            <div class="memory-segment unused" id="segment-unused"></div>
             <div class="memory-segment reserved" id="segment-reserved"></div>
+            <div class="memory-segment weights" id="segment-weights"></div> <!-- # [MOD] -->
+            <div class="memory-segment temporary" id="segment-temporary"></div> <!-- # [MOD] -->
             <div class="memory-segment allocated" id="segment-allocated"></div>
             <div class="memory-segment available" id="segment-available"></div>
           </div>
 
           <div class="memory-legend">
-            <div><span class="swatch unused"></span><span>Unused</span><strong id="mem-unused">--</strong></div>
             <div><span class="swatch reserved"></span><span>Reserved</span><strong id="mem-reserved">--</strong></div>
-            <div><span class="swatch allocated"></span><span>Allocated</span><strong id="mem-allocated">--</strong></div>
-            <div><span class="swatch available"></span><span>Available</span><strong id="mem-available">--</strong></div>
+            <div><span class="swatch weights"></span><span>Weights</span><strong id="mem-weights">--</strong></div> <!-- # [MOD] -->
+            <div><span class="swatch temporary"></span><span>Temporary Peak</span><strong id="mem-temporary">--</strong></div> <!-- # [MOD] -->
+            <div><span class="swatch allocated"></span><span>Allocated For KV</span><strong id="mem-allocated">--</strong></div> <!-- # [MOD] -->
+            <div><span class="swatch available"></span><span>Available For KV</span><strong id="mem-available">--</strong></div> <!-- # [MOD] -->
           </div>
 
           <div class="kv-head">
@@ -67,6 +69,8 @@
             <div class="metric-card"><span>P95</span><strong data-tpot-percentile="p95">--</strong></div>
             <div class="metric-card"><span>P99</span><strong data-tpot-percentile="p99">--</strong></div>
           </div>
+          <div class="percentile-head">Cache Hit Rate</div> <!-- # [MOD] -->
+          <div class="percentile-grid"><div class="metric-card"><span>Completed requests mean</span><strong id="performance-cache-hit-rate">--</strong></div></div> <!-- # [MOD] -->
         </section>
       </section>
 
@@ -82,6 +86,6 @@
     </aside>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=advance06"></script>
 </body>
 </html>
