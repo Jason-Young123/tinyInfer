@@ -78,6 +78,8 @@ The UI provides streaming generation together with runtime statistics such as:
 - End-to-end latency
 - KV-cache block states
 
+![Alt text](web_ui.png)
+
 ## Project Goal
 
 tinyInfer is primarily an educational inference framework. Its goal is to expose the core mechanisms behind modern LLM serving systems with a small and readable codebase, rather than hiding them behind large inference libraries.
