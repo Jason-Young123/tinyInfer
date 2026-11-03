@@ -512,16 +512,6 @@ input:disabled { opacity: .42; }
   gap: 8px;
 }
 #start-all { grid-column: span 1; }
-.controller-slot {
-  display: grid;
-  place-items: center;
-  min-height: 39px;
-  border: 1px dashed #29303d;
-  border-radius: 11px;
-  color: #4e5664;
-  font-size: 10px;
-}
-
 @media (max-width: 1250px) {
   .user-lower { grid-template-columns: 1fr; }
   .user-tools { grid-template-columns: minmax(0, 1fr) 300px; } /* [MOD] */
@@ -557,3 +547,38 @@ input:disabled { opacity: .42; }
   width: 300px; /* [MOD] Last Request整体收窄并固定，不再挤压Controller。 */
   max-width: 300px;
 }
+
+[hidden] { display: none !important; }
+
+.sd-stat-grid {
+  margin-top: 7px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.sd-controls {
+  grid-column: span 3;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #29303d;
+  border-radius: 11px;
+  background: #10141b;
+}
+
+.sd-control-row {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr) 28px;
+  gap: 8px;
+  align-items: center;
+  color: #aeb7c6;
+  font-size: 10px;
+}
+
+.sd-control-row strong {
+  color: #eef2f8;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#sd-control-status { margin-top: 5px; }

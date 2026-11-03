@@ -49,6 +49,7 @@ class RuntimeEvent:
     statistics: dict | None = None
     resource: dict | None = None
     performance: dict | None = None
+    speculative: dict | None = None  # 
     message: str | None = None
 
     def to_dict(self) -> dict:
@@ -69,7 +70,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         self._commands: Queue[list[SubmitRequest] | None] = Queue()
         self._stop = Event()
         self._thread: Thread | None = None
-        self._event_sink: Callable[[dict], None] | None = None # 最后指向
+        self._event_sink: Callable[[dict], None] | None = None # 最后指向app.py中的publish_from_thread
 
         self._busy_users: set[str] = set()
         self._busy_lock = Lock()
@@ -103,10 +104,21 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         if self._thread:
             self._thread.join(timeout=5.0)
 
+
+    def configure_speculative(self, max_draft_tokens: int) -> dict: # 修改max_draft_tokens
+        if not self.engine.config.speculative:
+            raise RuntimeError("Fatal: This server was started without speculative decoding.")
+        with self._busy_lock:
+            if self._busy_users:
+                raise RuntimeError("Fatal: max_draft_tokens can only be changed when all users are idle.")
+        self.engine.set_max_draft_tokens(max_draft_tokens)
+        return self.engine.speculative_snapshot()
+
+
     def submit(self, request: SubmitRequest) -> bool:
         return bool(self.submit_many([request]))
 
-    def submit_many(self, requests: list[SubmitRequest]) -> list[str]:
+    def submit_many(self, requests: list[SubmitRequest]) -> list[str]: # 前端调用接口
         accepted = []
         batch = []
 
@@ -121,7 +133,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                 batch.append(request)
 
         if batch:
-            self._commands.put(batch)
+            self._commands.put(batch) # 核心逻辑, _commands为请求队列, 存放哪个user输入了什么prompt、对应的采样策略是什么; 即对_commands队列内容的生产
         return accepted
 
     def is_user_busy(self, user_id: str) -> bool:
@@ -140,7 +152,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         with self._busy_lock:
             self._busy_users.discard(user_id)
 
-    def _admit_batch(self, batch: list[SubmitRequest]) -> None:
+    def _admit_batch(self, batch: list[SubmitRequest]) -> None: # 对_commands队列内容的消费, 即把_commands队列中的某一项list[SubmitRequest]中的内容逐一送入waiting_list
         for request in batch:
             try:
                 seq_id = self.engine.add_text_request( # 关键逻辑: 进入waiting list
@@ -166,7 +178,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                     )
                 )
 
-    def _drain_commands(self) -> None:
+    def _drain_commands(self) -> None: # 消费_commands队列中的一个元素, 底层调用_admit_batch
         while True:
             try:
                 batch = self._commands.get_nowait()
@@ -210,6 +222,8 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
             },
         }
 
+
+    # 核心函数: 打包后端所有统计数据, 发往前端
     def _emit_runtime_snapshot(self, force: bool = False) -> None: # 输出当前runtime的状态快照, 包括resource和perf
         now = time.perf_counter()
         if not force and now - self._last_snapshot_at < self.snapshot_interval_s:
@@ -217,17 +231,19 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         self._last_snapshot_at = now
 
         snapshot = {
-            "resource": self.engine.runtime_resource_snapshot(),
-            "performance": self._performance_snapshot(),
+            "resource": self.engine.runtime_resource_snapshot(), # memory occupancy
+            "speculative": self.engine.speculative_snapshot(), # speculative statistics
+            "performance": self._performance_snapshot(), # performance statistics
         }
         with self._snapshot_lock:
             self._last_runtime_snapshot = deepcopy(snapshot)
 
         self._emit(
-            RuntimeEvent(
+            RuntimeEvent( # panel更新逻辑2: type = runtime, 对statistics panel的数据进行刷新
                 type="runtime",
                 resource=snapshot["resource"],
                 performance=snapshot["performance"],
+                speculative=snapshot["speculative"]
             )
         )
 
@@ -255,7 +271,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
             if update.finished:
                 any_finished = True
                 self._record_statistics(update.statistics) # 记录全局的perf statistics
-                self._emit(
+                self._emit( # panel更新逻辑1: type = finished, 对user panel的数据进行刷新
                     RuntimeEvent(
                         type="finished",
                         user_id=user_id,
@@ -264,7 +280,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                         statistics=update.statistics,
                     )
                 )
-                self._seq_to_user.pop(update.seq_id, None)
+                self._seq_to_user.pop(update.seq_id, None) # 更新每个user自己的统计数据
                 self._release_user(user_id)
         return any_finished
 
@@ -285,26 +301,24 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
         self._emit_runtime_snapshot(force=True)
 
         while not self._stop.is_set():
-            if self.engine.scheduler.is_finished():
+            if self.engine.scheduler.is_finished(): # 当前空闲, 即waiting_list和running_list都为空; 阻塞等待第一个请求
                 try:
-                    batch = self._commands.get(timeout=0.1)
+                    batch = self._commands.get(timeout=0.1) # 每隔100ms检查_commands队列是否进来新请求
                 except Empty:
-                    self._emit_runtime_snapshot(force=True)
+                    self._emit_runtime_snapshot(force=True) # 如果没有则刷新ui
                     continue
                 if batch is None:
-                    continue
+                    break
                 self._admit_batch(batch)
 
-            self._drain_commands()
+            self._drain_commands() # 非idle, 直接admit
             if self.engine.scheduler.is_finished():
                 continue
 
             try:
                 items, updates = self.engine.step_with_updates()
                 if not items and not self.engine.scheduler.is_finished():
-                    raise RuntimeError(
-                        "scheduler made no progress while requests remain"
-                    )
+                    raise RuntimeError("scheduler made no progress while requests remain")
                 any_finished = self._handle_updates(updates) # 检查是否有seq请求推理完毕; 刷新全局perf statistics
                 self._emit_runtime_snapshot(force=True)
             except Exception as exc:

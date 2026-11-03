@@ -14,7 +14,14 @@ class Config:
     enforce_eager: bool = True              # 是否强制使用普通 eager execution; 如果为False可以启用CUDA Graph
     kvcache_block_size: int = 256           # 一个 KV Cache block 容纳多少个 token 的 K/V
 
-    hf_config: Any | None = None
+    # Speculative Decoding is opt-in; baseline behavior stays unchanged.
+    speculative: bool = False               # 是否启用SD模式
+    draft_model: str | None = None          # draft model路径
+    max_draft_tokens: int = 5               # max draft token length
+    adaptive_draft: bool = False            # 是否自适应调整draft token length
+
+    hf_config: Any | None = None            # target model超参数, 包括num_hidden_layers、num_key_value_heads、head_dim等
+    draft_hf_config: Any | None = None      # draft model超参数
     eos_token_id: int = -1
     num_kvcache_blocks: int = 0             # 运行时根据 GPU 剩余显存计算出来的KV Cache block总数量
 
@@ -28,6 +35,16 @@ class Config:
         if self.max_model_len > self.hf_config.max_position_embeddings:
             self.max_model_len = self.hf_config.max_position_embeddings
 
+        if self.speculative:
+            if not self.draft_model:
+                raise ValueError("--speculative requires a draft_model path")
+            self.draft_hf_config = AutoConfig.from_pretrained(
+                self.draft_model,
+                trust_remote_code=True,
+            )
+            if self.max_model_len > self.draft_hf_config.max_position_embeddings:
+                self.max_model_len = self.draft_hf_config.max_position_embeddings
+
 
 
 
@@ -40,6 +57,10 @@ class Config:
             raise ValueError("gpu_memory_utilization must be in (0, 1]")
         if self.tensor_parallel_size <= 0:
             raise ValueError("tensor_parallel_size must be positive")
+        if not 1 <= self.max_draft_tokens <= 32:
+            raise ValueError("max_draft_tokens not in range [1, 32]")
+        if self.speculative and not self.draft_model:
+            raise ValueError("speculative mode requires draft_model")
 
 
 

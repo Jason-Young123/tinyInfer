@@ -1,4 +1,3 @@
-// [MOD] User panel 从 3 个扩展到 5 个。
 const USERS = ["user1", "user2", "user3", "user4", "user5"];
 const PERFORMANCE_METRICS = [
   ["queue_time", "Queue", "latency"],
@@ -17,11 +16,20 @@ const usersRoot = document.querySelector("#users");
 const startAll = document.querySelector("#start-all");
 const blockGrid = document.querySelector("#block-grid");
 const performanceGrid = document.querySelector("#performance-grid");
+const sdStatistics = document.querySelector("#sd-statistics");
+const sdControls = document.querySelector("#sd-controls");
+const sdMaxDraft = document.querySelector("#sd-max-draft");
+const sdMaxDraftValue = document.querySelector("#sd-max-draft-value");
+const sdControlStatus = document.querySelector("#sd-control-status");
+const sdAcceptanceRate = document.querySelector("#sd-acceptance-rate");
+const sdAvgAccepted = document.querySelector("#sd-avg-accepted");
 const ws = new WebSocket(`ws://${location.host}/ws`);
 
 let blockNodes = [];
 let activeBlocks = new Set();
-let cachedBlocks = new Set(); // [MOD] 独立保存 cached-free block。
+let cachedBlocks = new Set();
+let sdEnabled = false;
+let confirmedMaxDraftTokens = null;
 
 function makePanel(userId, index) {
   const panel = document.createElement("section");
@@ -136,12 +144,14 @@ function setBusy(state, busy) {
 }
 
 function refreshControls() {
-  for (const state of states.values()) {
-    state.button.disabled = !ready(state) || ws.readyState !== WebSocket.OPEN;
-  }
-  startAll.disabled =
-    ws.readyState !== WebSocket.OPEN ||
-    ![...states.values()].some(ready);
+  for (const state of states.values()) state.button.disabled = !ready(state) || ws.readyState !== WebSocket.OPEN;
+  startAll.disabled = ws.readyState !== WebSocket.OPEN || ![...states.values()].some(ready);
+
+  const allUsersIdle = [...states.values()].every(state => !state.busy);
+  sdMaxDraft.disabled = !sdEnabled || ws.readyState !== WebSocket.OPEN || !allUsersIdle;
+  if (sdEnabled) sdControlStatus.textContent = allUsersIdle
+    ? "Global K · editable while all users are idle"
+    : "Global K · locked while requests are running";
 }
 
 function requestPayload(state) {
@@ -177,6 +187,18 @@ startAll.addEventListener("click", () => {
   if (requests.length) {
     ws.send(JSON.stringify({type: "submit_many", requests}));
   }
+});
+
+sdMaxDraft.addEventListener("input", () => {
+  sdMaxDraftValue.textContent = sdMaxDraft.value;
+});
+
+sdMaxDraft.addEventListener("change", () => {
+  if (sdMaxDraft.disabled || ws.readyState !== WebSocket.OPEN) return;
+  const value = Number(sdMaxDraft.value);
+  if (value === confirmedMaxDraftTokens) return;
+  sdControlStatus.textContent = "Updating global K...";
+  ws.send(JSON.stringify({type: "configure_sd", max_draft_tokens: value}));
 });
 
 function formatLatency(value) {
@@ -333,26 +355,40 @@ function updatePerformance(performance) {
   const count = performance.completed_requests ?? 0;
   document.querySelector("#completed-requests").textContent = `${count} completed`;
   const averages = performance.averages ?? {};
-
   for (const [key, , kind] of PERFORMANCE_METRICS) {
     const card = performanceGrid.querySelector(`[data-metric="${key}"] strong`);
-    const value = averages[key];
-    card.textContent = kind === "throughput"
-      ? formatThroughput(value)
-      : formatLatency(value);
+    card.textContent = kind === "throughput" ? formatThroughput(averages[key]) : formatLatency(averages[key]);
   }
-
-  // [MOD] 全局 TPOT 分位数是所有已完成请求的 request-level TPOT 分布。
-  //document.querySelector("#performance-cache-hit-rate").textContent = formatRate(performance.cache_hit_rate); // # [MOD]
-  const cacheNode = document.querySelector("#performance-cache-hit-rate");
-  if (cacheNode) {
-    cacheNode.textContent = formatRate(performance.cache_hit_rate);
-  }
+  document.querySelector("#performance-cache-hit-rate").textContent = formatRate(performance.cache_hit_rate);
   const percentiles = performance.tpot_percentiles ?? {};
   for (const key of ["p50", "p95", "p99"]) {
-    const node = document.querySelector(`[data-tpot-percentile="${key}"]`);
-    node.textContent = formatLatency(percentiles[key]);
+    document.querySelector(`[data-tpot-percentile="${key}"]`).textContent = formatLatency(percentiles[key]);
   }
+}
+
+function updateSpeculative(speculative) {
+  if (!speculative) return;
+  sdEnabled = Boolean(speculative.enabled);
+  sdStatistics.hidden = !sdEnabled;
+  sdControls.hidden = !sdEnabled;
+  if (!sdEnabled) {
+    refreshControls();
+    return;
+  }
+
+  const maxDraftTokens = Number(speculative.max_draft_tokens);
+  if (Number.isFinite(maxDraftTokens)) {
+    confirmedMaxDraftTokens = maxDraftTokens;
+    if (document.activeElement !== sdMaxDraft) {
+      sdMaxDraft.value = String(maxDraftTokens);
+      sdMaxDraftValue.textContent = String(maxDraftTokens);
+    }
+  }
+
+  sdAcceptanceRate.textContent = formatRate(speculative.acceptance_rate);
+  const avgAccepted = speculative.avg_acceptance_per_round;
+  sdAvgAccepted.textContent = avgAccepted == null ? "--" : Number(avgAccepted).toFixed(2);
+  refreshControls();
 }
 
 ws.addEventListener("message", (message) => {
@@ -361,6 +397,7 @@ ws.addEventListener("message", (message) => {
   if (event.type === "runtime") {
     updateResource(event.resource);
     updatePerformance(event.performance);
+    updateSpeculative(event.speculative);
     return;
   }
 
@@ -372,6 +409,21 @@ ws.addEventListener("message", (message) => {
         if (state) setBusy(state, false);
       }
     }
+    return;
+  }
+
+  if (event.type === "sd_config") {
+    if (event.speculative) updateSpeculative(event.speculative);
+    sdControlStatus.textContent = "Global K updated";
+    return;
+  }
+
+  if (event.type === "sd_error") {
+    if (confirmedMaxDraftTokens != null) {
+      sdMaxDraft.value = String(confirmedMaxDraftTokens);
+      sdMaxDraftValue.textContent = String(confirmedMaxDraftTokens);
+    }
+    sdControlStatus.textContent = event.message ?? "Failed to update global K";
     return;
   }
 
@@ -401,10 +453,7 @@ ws.addEventListener("message", (message) => {
 });
 
 ws.addEventListener("open", refreshControls);
-ws.addEventListener("close", () => {
-  for (const state of states.values()) state.button.disabled = true;
-  startAll.disabled = true;
-});
+ws.addEventListener("close", refreshControls);
 
 USERS.forEach(makePanel);
 initPerformanceGrid();

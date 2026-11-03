@@ -17,6 +17,9 @@ The current implementation supports Qwen3 models and includes:
 - PyTorch SDPA attention backend
 - Self-implemented CUDA FlashAttention/FlashDecoding backend
 
+### Inference Optimizations
+- Speculative Decoding
+
 ### Observability & Web UI
 - Runtime performance statistics
 - Web-based inference UI
@@ -33,8 +36,10 @@ MAX_JOBS=4 python -m pip install -e . --no-build-isolation
 
 ```bash
 TINYINFER_ATTENTION_BACKEND=torch \
-python examples/advance02_ui_plus.py \
-  --model /path/to/your/qwen3-0.6B/model
+python examples/advance07_sd.py \
+  --model /path/to/local/target/model \
+  [--speculative] \
+  [--draft-model /path/to/local/draft/model]
 ```
 
 
@@ -42,25 +47,12 @@ python examples/advance02_ui_plus.py \
 
 ```bash
 TINYINFER_ATTENTION_BACKEND=flash \
-python examples/advance02_ui_plus.py \
-  --model /path/to/your/qwen3-0.6B/model
+python examples/advance07_sd.py \
+  --model /path/to/local/target/model \
+  [--speculative] \
+  [--draft-model /path/to/local/draft/model]
 ```
 
-
-## Attention Backend
-
-The backend is selected through the environment variable:
-
-```text
-TINYINFER_ATTENTION_BACKEND=torch
-TINYINFER_ATTENTION_BACKEND=flash
-```
-
-If the variable is not specified, tinyInfer defaults to:
-
-```text
-torch
-```
 
 ## Web UI
 
@@ -77,6 +69,8 @@ The UI provides streaming generation together with runtime statistics such as:
 - Decode throughput
 - End-to-end latency
 - KV-cache block states
+- KV-cache hit rate
+- Ave acceptance length/rate for SD
 
 ![Alt text](web_ui.png)
 

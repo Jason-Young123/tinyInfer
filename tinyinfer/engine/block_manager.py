@@ -4,10 +4,6 @@ import xxhash
 
 from tinyinfer.engine.sequence import Sequence
 
-# 当前仅实现“正在被其他活跃 Sequence 持有时可共享的 Prefix KV”, 而不是“请求结束后依然可以保留、按 LRU 等策略等待未来复用的 Prefix Cache”
-# 后续待改进: 1. 真正把物理block作为cache形式, 引入替换策略, 而不是某个请求推理结束直接release
-#            2. 加入automatic prefix caching逻辑
-
 # 注意block_manager仅管理block的metadata, 不涉及KV cache实际数据
 class Block:
     def __init__(self, block_id: int):
@@ -180,21 +176,6 @@ class BlockManager:
             self._release_block(block_id)
         seq.block_table.clear()
 
-    ### allocate和free都是针对完整sequence进行多block分配(prefill阶段)与释放
-    # 调用_take_free_block进行分配
-    def allocate(self, seq: Sequence): # 为某个sequence分配新的物理block(可以分配多个)
-        need = seq.num_blocks - len(seq.block_table)
-        if need < 0:
-            raise RuntimeError("sequence has more physical blocks than logical blocks")
-        if need > self.num_free_blocks:
-            raise RuntimeError("not enough KV blocks")
-        for _ in range(need):
-            block = self._take_free_block()
-            seq.block_table.append(block.block_id)
-
-
-
-    
 
     # 只读函数, 寻找某个seq有多少命中的prefix cache块, 不会修改block属性
     def find_cached_prefix(self, seq: Sequence, max_cache_hit_tokens: int | None = None) -> tuple[list[int], int, int]:
@@ -207,7 +188,6 @@ class BlockManager:
             max_cache_hit_tokens = seq.num_prompt_tokens - 1
         max_full_blocks = max_cache_hit_tokens // self.block_size
         full_blocks = min(seq.num_prompt_tokens // self.block_size, max_full_blocks)
-        #full_blocks = seq.num_tokens // self.block_size # 这个sequence具有多少个完整的block(因为prefix cache只cache完整block)
 
         for logical_idx in range(full_blocks): 
             token_ids = seq.block_token_ids(logical_idx) # 基于该seq内的逻辑block idx找到token_ids列表
@@ -226,6 +206,7 @@ class BlockManager:
             prev_hash = block_hash # 更新prev_hash
 
         return cached_block_ids, num_prefix_cached_tokens, prev_hash
+
 
     # 仅在scheduler的admission步骤调用一次, 会把已命中的prefix cache block id加入block_table, 同时预分配完整prompt所需block并写入block_table;
     # 可以发现, 该函数返回后, block_table中的block_id可能已经存在于prefix cache中, 可能还没有、仅仅预分配
@@ -250,11 +231,13 @@ class BlockManager:
 
         seq.num_cached_tokens = cached_tokens
         seq.num_computed_tokens = cached_tokens
+        seq.target_kv_computed_tokens = cached_tokens  # hit block 只可能来自双 KV 完整提交的 Prefix Cache
+        seq.draft_kv_computed_tokens = cached_tokens  # 同一逻辑 block ID 同时命中 Draft storage
         seq.last_block_hash = prev_hash
         return True
 
     # 在一轮推理结束后调用, 无论是decode还是chunked prefill
-    def cache_computed_full_blocks(self, seq: Sequence, upto_token: int):
+    def cache_computed_full_blocks(self, seq: Sequence, upto_token: int):        
         full_blocks = upto_token // self.block_size
 
         prev_hash = 0
@@ -282,31 +265,24 @@ class BlockManager:
 
         seq.last_block_hash = prev_hash
 
-    # 预分配block; 这里的token_position = num_computed_tokens
-    def ensure_capacity_for_token_position(self, seq: Sequence, token_position: int) -> bool:
-        required_blocks = token_position // self.block_size + 1
+
+    # 预分配[start_position, start_position + num_tokens)范围内所有token所需的block
+    def ensure_capacity_for_token_position(self, seq: Sequence, start_position: int, num_tokens: int) -> bool:
+        if num_tokens <= 0:
+            return True
+
+        end_position = start_position + num_tokens  # 右开区间
+        required_blocks = (end_position + self.block_size - 1) // self.block_size
+
         missing = required_blocks - len(seq.block_table)
         if missing <= 0:
             return True
+
         if missing > self.num_free_blocks:
             return False
 
         for _ in range(missing):
             block = self._allocate_block()
             seq.block_table.append(block.block_id)
-        return True
 
-
-
-    # 由postprocess函数调用, 目的是在上一个block恰好填充满后开辟一个新的block
-    def prepare_next_decode_block(self, seq):
-        needed = seq.num_blocks - len(seq.block_table)
-        if needed == 0:
-            return True
-        if needed != 1:
-            raise RuntimeError("Currently one token decode should add at most one block")
-        if self.num_free_blocks == 0:
-            return False
-        block = self._take_free_block()
-        seq.block_table.append(block.block_id)
         return True

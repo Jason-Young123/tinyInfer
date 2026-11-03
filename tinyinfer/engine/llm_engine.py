@@ -8,11 +8,17 @@ from tinyinfer.engine.scheduler import Scheduler
 from tinyinfer.engine.sequence import Sequence
 from tinyinfer.sampling_params import SamplingParams
 
+# 一共存在3类性能统计数据: 
+# (1)resource statistics, 即memory profiling结果, 由block_manager提供
+# (2)speculative decoding statistics, 即SD模式下性能统计, 由model_runner提供
+# (3)seq-level performance statistics, 即每个seq的运行指标比如TTFT、TPOT、cache hit rate等, 由每个seq提供
+# 其中第(3)个新能数据需要顶层dynamic engine进行统计平均; (1)(2)则只需要顶层进行展示即可
+
 
 @dataclass(slots=True)
 class StreamUpdate:
     seq_id: int
-    token_id: int
+    token_ids: list[int]
     completion_token_ids: list[int]
     finished: bool
     statistics: dict | None
@@ -38,6 +44,8 @@ class LLMEngine:
 
 
     def add_request(self, token_ids: list[int], params: SamplingParams): # 简化后的创建请求函数, 用一个token list代表
+        if len(token_ids) >= self.config.max_model_len:
+            raise ValueError("Fatal: Prompt length greater than max_model_len.")
         seq = Sequence(token_ids, params)
         self.scheduler.add(seq) # 进入waiting_list
         return seq.seq_id
@@ -67,25 +75,40 @@ class LLMEngine:
         return self.add_request(token_ids, params)
 
 
+    # 修改全局Draft proposal上限
+    def set_max_draft_tokens(self, value: int) -> None:
+        if not self.config.speculative:
+            raise RuntimeError("Speculative decoding is not enabled.")
+        value = int(value)
+        if not 1 <= value <= 32:
+            raise ValueError("max_draft_tokens must be in [1, 32]")
+        if value == self.config.max_draft_tokens:
+            return
+
+        self.config.max_draft_tokens = value
+        self.scheduler.set_max_draft_tokens(value)
+        self.model_runner.reset_speculative_statistics()
+
+
     def step_with_updates(self) -> tuple[list, list[StreamUpdate]]:
         # 对内: 走通schedule -> run -> postprocess的完整一轮调度流程
-        output = self.scheduler.schedule() # 从waiting池子中挑选本轮进行推理的请求
+        output, K = self.scheduler.schedule() # 从waiting池子中挑选本轮进行推理的请求
         if not output.items:
             return [], []
-        sampled_tokens = self.model_runner.run(output) # 输出为dict of {seq_id: token_id}, 表示所有需要采样的请求所产生的下一个token id是什么
+        sampled_tokens = self.model_runner.run(output, K) # 输出为dict of {seq_id: token_id_list}, 表示所有需要采样的请求所产生的下一个token id是什么
         self.scheduler.postprocess(output, sampled_tokens) # 将产生的下一个token拼接到对应的seq请求中, 并注册prefix cache; 管理waiting/running list
 
         # 对外: 把当前一轮真正生成token的请求信息打包送给前端, 进行网页端聊天框刷新
         updates = []
         for item in output.items:
-            token_id = sampled_tokens.get(item.seq.seq_id) # 得到产生next token请求的next token id
-            if token_id is None: # 如果这一批的某个seq没有生成下一个token则直接跳过, 无需进行前端网页刷新
+            token_ids = sampled_tokens.get(item.seq.seq_id) # 得到产生next token请求的next token id
+            if token_ids is None: # 如果这一批的某个seq没有生成下一个token则直接跳过, 无需进行前端网页刷新
                 continue
             seq = item.seq
             updates.append(
                 StreamUpdate(
                     seq_id=seq.seq_id,
-                    token_id=token_id,
+                    token_ids=token_ids,
                     completion_token_ids=list(
                         seq.token_ids[seq.num_prompt_tokens:]
                     ),
@@ -135,6 +158,15 @@ class LLMEngine:
             "active_block_ids": active_block_ids, 
             "cached_block_ids": cached_block_ids, 
         }
+
+    
+    # 获取SD运行状态，用于UI
+    def speculative_snapshot(self) -> dict:
+        snapshot = self.model_runner.speculative_snapshot()
+        # K属于Config/Scheduler状态，不属于ModelRunner执行状态
+        snapshot["enabled"] = bool(self.config.speculative)
+        snapshot["max_draft_tokens"] = int(self.config.max_draft_tokens)
+        return snapshot
 
 
 

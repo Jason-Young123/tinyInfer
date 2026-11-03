@@ -39,11 +39,10 @@ class Sequence:
         self.num_prompt_tokens = len(token_ids) # 创建Sequence对象时已经确定, 后续token_ids可能在逐渐变长但num_prompts_tokens不会再改变
 
         # KV / 调度相关状态
-        # self.num_prefix_cached_tokens = 0       # 已经存在 KV cache、无需本轮重新计算的 prefix token 数
-        # self.num_scheduled_tokens = 0    # scheduler 决定本轮要真正送进模型的 token 数; 和后续 chunked prefill 配合
-        # self.is_prefill = True           # True: prefill；False: decode
         self.num_cached_tokens = 0              # 本请求 admission 时从 Prefix Cache 复用了多少 token
-        self.num_computed_tokens = 0            # 运行时真状态：从位置 0 开始，有多少 token 的 KV 已经可用
+        self.num_computed_tokens = 0            # 运行时真状态：从位置 0 开始，有多少 token 的 KV 已经可用; Target 与 Draft 共同确认的 committed KV frontier；Scheduler 只推进这个值
+        self.target_kv_computed_tokens = 0      # Target storage 中连续有效 KV 的 exclusive end；SD 轮内可能暂时领先/落后
+        self.draft_kv_computed_tokens = 0       # Draft storage 中连续有效 KV 的 exclusive end；SD 轮内可能暂时领先/落后
         self.num_scheduled_tokens = 0           # 这一轮要新增计算多少 token
         self.block_table: list[int] = []        # logical KV block -> physical block id
         self.last_block_hash: int = 0           # 最近一个满block对应的hash code
@@ -53,26 +52,26 @@ class Sequence:
         self.first_scheduled_time: float | None = None # 第一次被调度的时间戳
         self.first_token_time: float | None = None # TTFT
         self.finished_time: float | None = None
-        self.output_token_times: list[float] = []
-
-    @property
-    def last_token(self) -> int:
-        """返回当前最后一个 token，decode 阶段通常只需要它作为新输入。"""
-        return self.token_ids[-1]
+        self.output_token_times: list[float] = [] # 用于计算effective per-token latency; SD一轮多token时按round latency均摊
 
     @property
     def num_tokens(self) -> int: # 有property修饰的成员函数可以直接像访问成员变量一样访问
-        """当前总 token 数 = prompt + completion。"""
+        # 当前总 token 数 = prompt + completion
         return len(self.token_ids)
 
     @property
     def num_completion_tokens(self) -> int:
-        """已经生成的 token 数。"""
+        # 已经生成的 token 数
         return self.num_tokens - self.num_prompt_tokens
+    
+    @property
+    def last_token(self) -> int:
+        # 返回当前最后一个 token，decode 阶段通常只需要它作为新输入
+        return self.token_ids[-1]
 
     @property
     def is_finished(self) -> bool:
-        """当前请求是否已经结束。"""
+        # 当前请求是否已经结束
         return self.status is SequenceStatus.FINISHED
 
     @property
@@ -118,14 +117,26 @@ class Sequence:
         if self.first_scheduled_time is None: # 首次被调度
             self.first_scheduled_time = time.perf_counter()
 
-    def append_token(self, token_id: int):
-        """把模型新生成的 token 追加到当前 Sequence。"""
-        self.token_ids.append(int(token_id))
+    def append_token(self, token_id: int | list[int]):
+        # 把模型新生成的一个或多个 token 追加到当前 Sequence
+        token_ids = [token_id] if isinstance(token_id, int) else token_id
+        if not token_ids:
+            return
+        self.token_ids.extend(int(token) for token in token_ids)
 
         now = time.perf_counter()
-        if self.first_token_time is None:
+
+        # final prefill在当前设计下只会产生一个token
+        if self.first_token_time is None and token_ids: 
             self.first_token_time = now
-        self.output_token_times.append(now) # 同步计时
+            self.output_token_times.append(now)
+            return
+        
+        # SD一轮可能产生多个token，将本轮耗时平均摊到这些token上
+        prev_time = self.output_token_times[-1]
+        token_latency = (now - prev_time) / len(token_ids)
+        self.output_token_times.extend(prev_time + token_latency * (i + 1) for i in range(len(token_ids)))
+
 
     def mark_finished(self) -> None:
         self.status = SequenceStatus.FINISHED
@@ -133,8 +144,8 @@ class Sequence:
         #print("only for test: ", self.finished_time)
 
 
+    #达到 completion 上限、模型上下文上限，或生成 EOS 时停止
     def should_stop(self, eos_token_id: int, max_model_len: int) -> bool:
-        """达到 completion 上限、模型上下文上限，或生成 EOS 时停止。"""
         # case1: 用户指定的最大生成长度
         if self.num_completion_tokens >= self.sampling_params.max_tokens:
             return True

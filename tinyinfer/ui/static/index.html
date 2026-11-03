@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tinyInfer Console</title>
-  <link rel="stylesheet" href="/static/style.css?v=advance06">
+  <link rel="stylesheet" href="/static/style.css?v=advance07">
 </head>
 <body>
   <main class="shell">
@@ -69,8 +69,15 @@
             <div class="metric-card"><span>P95</span><strong data-tpot-percentile="p95">--</strong></div>
             <div class="metric-card"><span>P99</span><strong data-tpot-percentile="p99">--</strong></div>
           </div>
-          <div class="percentile-head">Cache Hit Rate</div> <!-- # [MOD] -->
-          <div class="percentile-grid"><div class="metric-card"><span>Completed requests mean</span><strong id="performance-cache-hit-rate">--</strong></div></div> <!-- # [MOD] -->
+          <div class="percentile-head">Cache Hit Rate</div>
+          <div class="percentile-grid"><div class="metric-card"><span>Completed requests mean</span><strong id="performance-cache-hit-rate">--</strong></div></div>
+          <div id="sd-statistics" hidden>
+            <div class="percentile-head">Speculative Decoding</div>
+            <div class="sd-stat-grid">
+              <div class="metric-card"><span>Acceptance Rate</span><strong id="sd-acceptance-rate">--</strong></div>
+              <div class="metric-card"><span>Avg Accepted / Round</span><strong id="sd-avg-accepted">--</strong></div>
+            </div>
+          </div>
         </section>
       </section>
 
@@ -78,14 +85,19 @@
         <div class="panel-title">Controller</div>
         <div class="controller-grid">
           <button id="start-all" class="primary" disabled>Start all ready</button>
-          <div class="controller-slot">future</div>
-          <div class="controller-slot">future</div>
-          <div class="controller-slot">future</div>
+          <div id="sd-controls" class="sd-controls" hidden>
+            <div class="sd-control-row">
+              <span>Max Draft Tokens (K)</span>
+              <input id="sd-max-draft" type="range" min="1" max="32" step="1" value="5">
+              <strong id="sd-max-draft-value">5</strong>
+            </div>
+            <div id="sd-control-status" class="subtle">Global K · editable while all users are idle</div>
+          </div>
         </div>
       </section>
     </aside>
   </main>
 
-  <script src="/static/app.js?v=advance06"></script>
+  <script src="/static/app.js?v=advance07"></script>
 </body>
 </html>

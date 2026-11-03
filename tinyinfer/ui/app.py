@@ -38,7 +38,7 @@ class SocketHub:
         while True:
             event = await self.events.get()
             dead = []
-            for socket in self.clients:
+            for socket in list(self.clients):
                 try:
                     await socket.send_json(event)
                 except Exception:
@@ -108,6 +108,18 @@ def create_app(
             while True:
                 payload = await socket.receive_json()
                 request_type = payload.get("type")
+
+                if request_type == "configure_sd":
+                    try:
+                        raw_max = payload.get("max_draft_tokens")
+                        if raw_max is None:
+                            raise ValueError("max_draft_tokens is required")
+                        snapshot = service.configure_speculative(int(raw_max))
+                        await socket.send_json({"type": "sd_config", "speculative": snapshot})
+                    except (TypeError, ValueError, RuntimeError) as exc:
+                        await socket.send_json({"type": "sd_error", "message": str(exc)})
+                    continue
+                        
                 raw_requests = (
                     payload.get("requests", [])
                     if request_type == "submit_many"
