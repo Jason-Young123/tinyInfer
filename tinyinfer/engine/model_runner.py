@@ -508,10 +508,11 @@ class ModelRunner:
 
                 print(
                     f"[BASE] "
-                    f"pred_pos={pred_pos} "
+                    f"pos={pred_pos} "
                     f"input={item.seq.token_ids[input_pos]} "
+                    f"output={argmax_token} "
                     f"argmax={argmax_token} "
-                    f"target={ids[0].item()} "
+                    f"top1_id={ids[0].item()} "
                     f"top1={values[0].item():.6f} "
                     f"top2_id={ids[1].item()} "
                     f"top2={values[1].item():.6f} "
@@ -598,6 +599,8 @@ class ModelRunner:
         draft_probs: dict[int, list[torch.Tensor]] = {item.seq.seq_id: [] for item in decode_items}  # 即Q矩阵, shape = [K, V]
         #target_probs: dict[int, list[torch.Tensor]] = {item.seq.seq_id: [] for item in decode_items} # 即P矩阵, shape = [K + 1, V]
         target_probs: dict[int, torch.Tensor] = {}
+        if DEBUG:
+            target_raw_logits: dict[int, torch.Tensor] = {} # for debug only
         decode_start: dict[int, int] = {item.seq.seq_id: item.start_pos for item in decode_items}
 
         # 为保险额外检查draft/target kv cache reservation情况; 相应逻辑理应由schedule处理, 这里是防御性编程
@@ -711,7 +714,7 @@ class ModelRunner:
         flat_sample_mask_cumsum: list[int] = [0] # 每个item对应的sample logits行前缀和
         max_blocks = max(len(item.seq.block_table) for item in output.items)
 
-        # Step 2.1: 按 SchedulerOutput 原始 item 顺序重新构造 mixed batch
+        # 按 SchedulerOutput 原始 item 顺序重新构造 mixed batch
         for item in output.items:
             seq = item.seq
             seq_id = seq.seq_id
@@ -818,6 +821,8 @@ class ModelRunner:
                         results[item.seq.seq_id] = [int(target_tokens[left].item())] 
                     continue
                 target_probs[item.seq.seq_id] = target_distributions[left:right] # 如果是decode, 则记录P矩阵
+                if DEBUG:
+                    target_raw_logits[item.seq.seq_id] = target_logits[left:right] # for debug only
 
         finally:
             reset_context()
@@ -843,6 +848,38 @@ class ModelRunner:
             batch_proposed += len(proposals)
             batch_accepted += accepted_count
             batch_rounds += 1
+
+            if DEBUG:
+                raw_logits = target_raw_logits[seq_id]
+                for i, token in enumerate(final_tokens):
+                    logits_i = raw_logits[i].float()
+                    values, ids = torch.topk(logits_i, k=2)
+                    argmax_token = int(raw_logits[i].argmax().item())
+                    if seq.sampling_params.greedy:
+                        assert token == argmax_token, (
+                            f"Greedy SD mismatch: pos={item.start_pos + i + 1}, "
+                            f"output={token}, target_argmax={argmax_token}"
+                        )
+                    proposal = proposals[i] if i < len(proposals) else None
+                    accepted = i < accepted_count
+                    input_token = (seq.token_ids[item.start_pos] if i == 0 else proposals[i - 1])
+
+                    print(
+                        f"[SD] "
+                        f"K={K} "
+                        f"pos={item.start_pos + i + 1} "
+                        f"input={input_token} "
+                        f"proposal={proposal} "
+                        f"accepted={accepted} "
+                        f"output={token} "
+                        f"argmax={argmax_token} "
+                        f"top1_id={ids[0].item()} "
+                        f"top1={values[0].item():.6f} "
+                        f"top2_id={ids[1].item()} "
+                        f"top2={values[1].item():.6f} "
+                        f"margin={(values[0] - values[1]).item():.6f}",
+                        flush=True,
+                    )
 
         # 更新全局SD statistics
         self._drafted_tokens += batch_proposed
