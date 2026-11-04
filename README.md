@@ -35,8 +35,8 @@ MAX_JOBS=4 python -m pip install -e . --no-build-isolation
 ## Run with PyTorch SDPA
 
 ```bash
-TINYINFER_ATTENTION_BACKEND=torch \
 python examples/advance07_sd.py \
+  --attention-backend torch \
   --model /path/to/local/target/model \
   [--speculative] \
   [--draft-model /path/to/local/draft/model]
@@ -46,8 +46,8 @@ python examples/advance07_sd.py \
 ## Run with Self-Implemented FlashAttention
 
 ```bash
-TINYINFER_ATTENTION_BACKEND=flash \
 python examples/advance07_sd.py \
+  --attention-backend flash \
   --model /path/to/local/target/model \
   [--speculative] \
   [--draft-model /path/to/local/draft/model]

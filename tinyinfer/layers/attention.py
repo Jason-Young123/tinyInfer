@@ -149,6 +149,7 @@ class Attention(nn.Module):
         scale: float,
         kv_cache: PagedKVCache | None,
         block_size: int,
+        backend: str = "torch",
     ):
         super().__init__()
         if num_heads % num_kv_heads != 0:
@@ -162,11 +163,9 @@ class Attention(nn.Module):
         self.block_size = block_size
 
         # 增加attention backend选择(torch or flashattention); runtime backend，不污染模型 config。
-        self.backend = os.getenv("TINYINFER_ATTENTION_BACKEND", "torch").strip().lower()
-        if self.backend not in {"torch", "flash"}:
-            raise ValueError(
-                "TINYINFER_ATTENTION_BACKEND must be 'torch' or 'flash'"
-            )
+        if backend not in {"torch", "flash"}:
+            raise ValueError("attention backend must be 'torch' or 'flash'")
+        self.backend = backend
 
     def set_kv_cache(self, kv_cache: PagedKVCache) -> None:
         if kv_cache.block_size != self.block_size:

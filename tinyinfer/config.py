@@ -13,6 +13,7 @@ class Config:
     tensor_parallel_size: int = 1           # 单卡默认TP=1, 后期会在单卡上模拟TP = 2/4
     enforce_eager: bool = True              # 是否强制使用普通 eager execution; 如果为False可以启用CUDA Graph
     kvcache_block_size: int = 256           # 一个 KV Cache block 容纳多少个 token 的 K/V
+    attention_backend: str = "torch"        # attention backend 选型
 
     # Speculative Decoding is opt-in; baseline behavior stays unchanged.
     speculative: bool = False               # 是否启用SD模式

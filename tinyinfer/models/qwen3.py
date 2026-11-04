@@ -31,7 +31,7 @@ def _get_rope_theta(config):
 
 # 组装Attention
 class Qwen3Attention(nn.Module):
-    def __init__(self, config, layer_idx:int, kv_cache=None):
+    def __init__(self, config, layer_idx:int, kv_cache=None, backend = "torch"):
         super().__init__()
         self.num_heads = int(config.num_attention_heads)
         self.num_kv_heads = int(config.num_key_value_heads)
@@ -64,7 +64,8 @@ class Qwen3Attention(nn.Module):
             head_dim = self.head_dim,
             scale = self.head_dim ** (-0.5),
             kv_cache = kv_cache,
-            block_size=int(getattr(config, "kvcache_block_size", 256))
+            block_size=int(getattr(config, "kvcache_block_size", 256)),
+            backend=backend
         )
 
         self.o_proj = LinearBase(
@@ -122,10 +123,10 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx:int, kv_cache = None):
+    def __init__(self, config, layer_idx:int, kv_cache = None, backend = "torch"):
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps = config.rms_norm_eps)
-        self.self_attn = Qwen3Attention(config, layer_idx, kv_cache)
+        self.self_attn = Qwen3Attention(config, layer_idx, kv_cache, backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps = config.rms_norm_eps)
         self.mlp = Qwen3MLP(config)
 
@@ -152,11 +153,11 @@ class Qwen3DecoderLayer(nn.Module):
 
 # 完整模型Backbone, embedding layer + multi-layer transformer, 但不包含最后的LM Head
 class Qwen3Model(nn.Module):
-    def __init__(self, config, kv_cache=None):
+    def __init__(self, config, kv_cache=None, backend = "torch"):
         super().__init__()
         self.embed_tokens = VocabEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config, i, kv_cache) for i in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config, i, kv_cache, backend) for i in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -188,10 +189,10 @@ class Qwen3Model(nn.Module):
 
 # Backbone + 最后的LM Head
 class Qwen3ForCausalLM(nn.Module):
-    def __init__(self, config, kv_cache=None):
+    def __init__(self, config, kv_cache=None, backend = "torch"):
         super().__init__()
         self.config = config
-        self.model = Qwen3Model(config, kv_cache)
+        self.model = Qwen3Model(config, kv_cache, backend)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         
         # 若 checkpoint 使用 tied embeddings(即weight tying, 权重绑定), 让两个 module 共享同一个 Parameter

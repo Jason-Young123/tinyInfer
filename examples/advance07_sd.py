@@ -19,13 +19,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run tinyInfer Speculative Decoding UI.")
     parser.add_argument("--speculative", action="store_true", help="Enable speculative decoding.")
     parser.add_argument("--model", default=str(DEFAULT_TARGET_MODEL), help="Target model path.")
+    parser.add_argument("--attention-backend", type=str, choices=["torch", "flash"], default="torch", help="Attention backend: torch or flash")
     parser.add_argument("--draft-model", default=str(DEFAULT_DRAFT_MODEL), help="Draft model path.")
     parser.add_argument("--max-draft-tokens", type=int, default=5, help="Global K, valid range: 1..32.")
     parser.add_argument("--max-num-batched-tokens", type=int, default=512)
     parser.add_argument("--max-num-seqs", type=int, default=8)
     parser.add_argument("--max-model-len", type=int, default=16384)
     parser.add_argument("--block-size", type=int, default=16)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.80)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.95)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
@@ -44,6 +45,7 @@ def main():
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         kvcache_block_size=args.block_size,
+        attention_backend=args.attention_backend,
         speculative=args.speculative,
         draft_model=args.draft_model if args.speculative else None,
         max_draft_tokens=args.max_draft_tokens,

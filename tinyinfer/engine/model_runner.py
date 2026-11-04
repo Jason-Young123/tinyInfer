@@ -219,8 +219,8 @@ class ModelRunner:
         
 
         # step1: 先不绑定kv cache, 单纯构造模型(target和draft)
-        self.model = Qwen3ForCausalLM(hf_config, kv_cache = None).to(device = self.device, dtype = self.dtype)
-        self.draft_model = Qwen3ForCausalLM(draft_hf_config, kv_cache=None).to(device=self.device, dtype=self.dtype) if self.config.speculative else None
+        self.model = Qwen3ForCausalLM(hf_config, kv_cache = None, backend = self.config.attention_backend).to(device = self.device, dtype = self.dtype)
+        self.draft_model = Qwen3ForCausalLM(draft_hf_config, kv_cache=None, backend = self.config.attention_backend).to(device=self.device, dtype=self.dtype) if self.config.speculative else None
 
         # step2: 加载真实的Qwen3 checkpoint
         self.load_report = load_weights(self.model, self.config.model, strict = True)
