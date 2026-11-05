@@ -23,7 +23,17 @@ const sdMaxDraftValue = document.querySelector("#sd-max-draft-value");
 const sdControlStatus = document.querySelector("#sd-control-status");
 const sdAcceptanceRate = document.querySelector("#sd-acceptance-rate");
 const sdAvgAccepted = document.querySelector("#sd-avg-accepted");
+const sdTrendChart = document.querySelector("#sd-trend-chart");
+const sdTrendWrap = document.querySelector("#sd-chart-viewport");
+const sdTrendEmpty = document.querySelector("#sd-trend-empty");
+const sdTrendCount = document.querySelector("#sd-trend-count");
+const globalController = document.querySelector("#global-controller");
 const ws = new WebSocket(`ws://${location.host}/ws`);
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const SD_TREND_VISIBLE_POINTS = 100;
+let previousSdCounters = null;
+let sdTrendSamples = [];
 
 let blockNodes = [];
 let activeBlocks = new Set();
@@ -112,8 +122,14 @@ function makePanel(userId, index) {
     statCacheHitRate: panel.querySelector(".stat-cache-hit-rate"), // # [MOD]
     busy: false,
     outputBase: "",
+    followOutput: true,
   };
   states.set(userId, state);
+
+  // Only auto-follow while the user is already viewing the bottom of this panel.
+  state.output.addEventListener("scroll", () => {
+    state.followOutput = isNearBottom(state.output);
+  }, {passive: true});
 
   state.input.addEventListener("input", refreshControls);
   state.button.addEventListener("click", () => submitOne(state));
@@ -162,6 +178,19 @@ function requestPayload(state) {
     temperature: Number(state.temperature.value),
     greedy: state.greedy.checked,
   };
+}
+
+function isNearBottom(element, threshold = 24) {
+  return element.scrollHeight - element.clientHeight - element.scrollTop <= threshold;
+}
+
+function updateOutput(state, text) {
+  state.output.textContent = text;
+
+  // Preserve the user's reading position when they have scrolled into history.
+  if (state.followOutput) {
+    state.output.scrollTop = state.output.scrollHeight;
+  }
 }
 
 function beginLocal(state) {
@@ -366,18 +395,179 @@ function updatePerformance(performance) {
   }
 }
 
+function svgElement(name, attributes = {}, text = null) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) {
+    node.setAttribute(key, String(value));
+  }
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function renderSdTrend() {
+  const previousScrollLeft = sdTrendWrap.scrollLeft;
+  const wasAtRight = previousScrollLeft + sdTrendWrap.clientWidth >= sdTrendWrap.scrollWidth - 4;
+  sdTrendChart.replaceChildren();
+
+  if (!sdTrendSamples.length) {
+    sdTrendChart.hidden = true;
+    sdTrendEmpty.hidden = false;
+    sdTrendCount.textContent = "Waiting for rounds";
+    sdTrendChart.style.width = "100%";
+    return;
+  }
+
+  sdTrendChart.hidden = false;
+  sdTrendEmpty.hidden = true;
+
+  const height = 190;
+  const margin = {top: 12, right: 16, bottom: 30, left: 42};
+  const viewportWidth = Math.max(320, sdTrendWrap.clientWidth || 600);
+  const viewportPlotWidth = Math.max(1, viewportWidth - margin.left - margin.right);
+  const count = sdTrendSamples.length;
+
+  // Keep exactly 100 samples visible per viewport. Older samples remain in
+  // memory and extend the SVG horizontally instead of being discarded.
+  const pointSpacing = viewportPlotWidth / (SD_TREND_VISIBLE_POINTS - 1);
+  const plotWidth = count > SD_TREND_VISIBLE_POINTS
+    ? pointSpacing * (count - 1)
+    : viewportPlotWidth;
+  const width = margin.left + plotWidth + margin.right;
+  const x = index => margin.left + (
+    count > SD_TREND_VISIBLE_POINTS
+      ? index * pointSpacing
+      : count > 1
+        ? index * plotWidth / (count - 1)
+        : plotWidth / 2
+  );
+
+  const sliderK = Number(sdMaxDraft.value);
+  const currentK = confirmedMaxDraftTokens ?? (Number.isFinite(sliderK) ? sliderK : 5);
+  const observedMax = sdTrendSamples.reduce((max, point) => Math.max(max, point.value), 0);
+  const adaptiveMax = Math.max(1, Math.ceil(observedMax * 1.25 * 2) / 2);
+  const yMax = Number.isFinite(currentK) && currentK > 0
+    ? Math.max(1, Math.min(currentK, adaptiveMax))
+    : adaptiveMax;
+  const plotHeight = height - margin.top - margin.bottom;
+  const y = value => margin.top + plotHeight - (value / yMax) * plotHeight;
+
+  sdTrendChart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  sdTrendChart.setAttribute("width", String(width));
+  sdTrendChart.setAttribute("height", String(height));
+  sdTrendChart.style.width = `${width}px`;
+
+  const grid = svgElement("g", {"class": "sd-chart-grid"});
+  for (const tick of [0, yMax / 2, yMax]) {
+    const yy = y(tick);
+    grid.appendChild(svgElement("line", {
+      x1: margin.left, y1: yy, x2: width - margin.right, y2: yy,
+    }));
+    grid.appendChild(svgElement("text", {
+      x: margin.left - 9, y: yy + 4, "text-anchor": "end",
+    }, tick.toFixed(1)));
+  }
+
+  // Label every 20 samples so each 100-point viewport has readable round labels.
+  const xTickIndices = new Set([0, count - 1]);
+  for (let i = 20; i < count - 1; i += 20) xTickIndices.add(i);
+  for (const index of [...xTickIndices].sort((a, b) => a - b)) {
+    const xx = x(index);
+    grid.appendChild(svgElement("line", {
+      x1: xx, y1: margin.top, x2: xx, y2: height - margin.bottom,
+      "class": "sd-chart-x-grid",
+    }));
+    grid.appendChild(svgElement("text", {
+      x: xx, y: height - 7, "text-anchor": "middle",
+    }, String(sdTrendSamples[index].round)));
+  }
+  sdTrendChart.appendChild(grid);
+
+  // One SVG path represents the complete series; avoid one DOM node per point.
+  const pathData = sdTrendSamples.map((point, index) =>
+    `${index === 0 ? "M" : "L"} ${x(index).toFixed(2)} ${y(point.value).toFixed(2)}`
+  ).join(" ");
+  sdTrendChart.appendChild(svgElement("path", {
+    d: pathData,
+    "class": "sd-chart-line",
+  }));
+
+  const latest = sdTrendSamples[count - 1];
+  const latestPoint = svgElement("circle", {
+    cx: x(count - 1),
+    cy: y(latest.value),
+    r: 3.5,
+    "class": "sd-chart-point",
+  });
+  latestPoint.appendChild(svgElement(
+    "title",
+    {},
+    `Round ${latest.round} · backend cumulative avg ${latest.value.toFixed(2)}`
+  ));
+  sdTrendChart.appendChild(latestPoint);
+
+  const firstRound = sdTrendSamples[0].round;
+  const lastRound = latest.round;
+  sdTrendCount.textContent = `${count} points · rounds ${firstRound}–${lastRound}`;
+
+  // Follow new data only while the viewer is already at the right edge.
+  // If the user has scrolled into history, preserve their current position.
+  requestAnimationFrame(() => {
+    const maxScroll = Math.max(0, sdTrendWrap.scrollWidth - sdTrendWrap.clientWidth);
+    sdTrendWrap.scrollLeft = wasAtRight
+      ? maxScroll
+      : Math.min(previousScrollLeft, maxScroll);
+  });
+}
+
+function updateSdTrend(speculative) {
+  const accepted = Number(speculative.accepted_tokens ?? 0);
+  const rounds = Number(speculative.verification_rounds ?? 0);
+  const avgRaw = speculative.avg_acceptance_per_round;
+  const avgAccepted = avgRaw == null ? null : Number(avgRaw);
+
+  if (!Number.isFinite(accepted) || !Number.isFinite(rounds)) return;
+  if (avgAccepted != null && !Number.isFinite(avgAccepted)) return;
+
+  // Backend counters are cumulative. If K changes and the backend resets them,
+  // start a new chart segment rather than connecting points from different runs.
+  if (
+    previousSdCounters &&
+    (accepted < previousSdCounters.accepted || rounds < previousSdCounters.rounds)
+  ) {
+    sdTrendSamples = [];
+  }
+  previousSdCounters = {accepted, rounds};
+
+  // Plot the backend's cumulative avg_acceptance_per_round directly.
+  // Repeated runtime snapshots at the same round update that point; no
+  // interval-delta calculation or frontend smoothing is applied.
+  if (rounds > 0 && avgAccepted != null) {
+    const last = sdTrendSamples[sdTrendSamples.length - 1];
+    if (last && last.round === rounds) {
+      last.value = avgAccepted;
+    } else if (!last || rounds > last.round) {
+      sdTrendSamples.push({round: rounds, value: avgAccepted});
+    }
+  }
+
+  renderSdTrend();
+}
+
+window.addEventListener("resize", renderSdTrend);
+
 function updateSpeculative(speculative) {
   if (!speculative) return;
   sdEnabled = Boolean(speculative.enabled);
   sdStatistics.hidden = !sdEnabled;
   sdControls.hidden = !sdEnabled;
+  globalController.classList.toggle("has-sd", sdEnabled);
   if (!sdEnabled) {
     refreshControls();
     return;
   }
 
   const maxDraftTokens = Number(speculative.max_draft_tokens);
-  if (Number.isFinite(maxDraftTokens)) {
+  if (Number.isFinite(maxDraftTokens) && maxDraftTokens >= 1) {
     confirmedMaxDraftTokens = maxDraftTokens;
     if (document.activeElement !== sdMaxDraft) {
       sdMaxDraft.value = String(maxDraftTokens);
@@ -388,6 +578,7 @@ function updateSpeculative(speculative) {
   sdAcceptanceRate.textContent = formatRate(speculative.acceptance_rate);
   const avgAccepted = speculative.avg_acceptance_per_round;
   sdAvgAccepted.textContent = avgAccepted == null ? "--" : Number(avgAccepted).toFixed(2);
+  updateSdTrend(speculative);
   refreshControls();
 }
 
@@ -431,14 +622,12 @@ ws.addEventListener("message", (message) => {
   if (!state) return;
 
   if (event.type === "token") {
-    state.output.textContent = state.outputBase + (event.text ?? "");
-    state.output.scrollTop = state.output.scrollHeight;
+    updateOutput(state, state.outputBase + (event.text ?? ""));
     return;
   }
 
   if (event.type === "finished") {
-    state.output.textContent = state.outputBase + (event.text ?? "") + "\n\n";
-    state.output.scrollTop = state.output.scrollHeight;
+    updateOutput(state, state.outputBase + (event.text ?? "") + "\n\n");
     updateUserStatistics(state, event.statistics);
     state.input.value = "";
     setBusy(state, false);
@@ -446,8 +635,7 @@ ws.addEventListener("message", (message) => {
   }
 
   if (event.type === "error") {
-    state.output.textContent = state.outputBase + `[error] ${event.message}\n\n`;
-    state.output.scrollTop = state.output.scrollHeight;
+    updateOutput(state, state.outputBase + `[error] ${event.message}\n\n`);
     setBusy(state, false);
   }
 });

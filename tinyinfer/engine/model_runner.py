@@ -10,7 +10,7 @@ from tinyinfer.utils.loader import load_weights
 from tinyinfer.engine.speculative import speculative_verify
 
 
-DEBUG = True # for debug mode only
+DEBUG = False # for debug mode only
 
 
 # 将seq内的逻辑token position映射到paged KV的flat slot
@@ -468,10 +468,11 @@ class ModelRunner:
         if not output.items:
             return {}
         try:
+            # 一个batch全部送入模型进行前向传播
             input_ids, positions = self.prepare_batch(output) # shape = [num_flat_tokens]
-            # 一个batch全部送入模型进行前向传播 
             hidden_states, _ = self.model(input_ids, positions, output_hidden_states = False) # shape = [num_flat_tokens, hidden_dim]
-            
+
+
             # 本轮所有 Target 输入都已经真正写入 Target KV
             for item in output.items:
                 end = item.start_pos + item.num_tokens
@@ -546,9 +547,11 @@ class ModelRunner:
                 isDistributionOut = False
             )
 
-            return { # 第几个item增加了哪个token; 并非所有item都会增加token
-                item.seq.seq_id: [int(token)] for item, token in zip(sample_items, tokens.tolist())
-            }
+            # 哪个seq增加了哪个token; 并非所有item都会增加token
+            # 注意tolist会触发GPU和CPU同步; 只有同步之后才可以统计GPU侧执行耗时
+            result = {item.seq.seq_id: [int(token)] for item, token in zip(sample_items, tokens.tolist())}
+            return result
+        
         finally:
             # Context 是一次 forward 的动态状态，绝不能泄漏到下一轮
             reset_context()
@@ -632,7 +635,7 @@ class ModelRunner:
         if decode_items:
             max_blocks = max(len(item.seq.block_table) for item in decode_items)
 
-            # 一共执行 K + 1 次 Draft forwar, 其中前 K 次生成 proposal，最后一次只写KV cache
+            # 一共执行 K + 1 次 Draft forward, 其中前 K 次生成 proposal，最后一次只写KV cache
             for depth in range(K + 1):
                 input_token_ids: list[int] = []
                 positions: list[int] = []
