@@ -82,6 +82,9 @@ function makePanel(userId, index) {
             <div class="user-stat-row single">
               <div class="user-stat"><span>TTFT</span><strong class="stat-ttft">--</strong></div>
             </div>
+            <div class="user-stat-row single">
+              <div class="user-stat"><span>Decode tok/s</span><strong class="stat-decode-throughput">--</strong></div>
+            </div>
             <div class="user-stat-row pair">
               <div class="user-stat"><span>TPOT mean</span><strong class="stat-tpot">--</strong></div>
               <div class="user-stat"><span>TPOT p50</span><strong class="stat-tpot-p50">--</strong></div>
@@ -114,6 +117,7 @@ function makePanel(userId, index) {
     tempValue: panel.querySelector(".temp-value"),
     greedy: panel.querySelector(".greedy"),
     statTTFT: panel.querySelector(".stat-ttft"),
+    statDecodeThroughput: panel.querySelector(".stat-decode-throughput"),
     statTPOT: panel.querySelector(".stat-tpot"),
     statTPOTP50: panel.querySelector(".stat-tpot-p50"), // [MOD]
     statTPOTP95: panel.querySelector(".stat-tpot-p95"), // [MOD]
@@ -265,6 +269,14 @@ function formatRate(value) { // # [MOD]
 function updateUserStatistics(state, statistics) {
   if (!statistics) return;
   state.statTTFT.textContent = formatLatency(statistics.ttft);
+
+  // TPOT is measured in seconds/token, so its reciprocal is tokens/second.
+  const tpot = Number(statistics.tpot);
+  const decodeThroughput = Number.isFinite(tpot) && tpot > 0
+    ? 1 / tpot
+    : null;
+  state.statDecodeThroughput.textContent = formatThroughput(decodeThroughput);
+
   state.statTPOT.textContent = formatLatency(statistics.tpot);
   state.statTPOTP50.textContent = formatLatency(statistics.tpot_p50); // [MOD]
   state.statTPOTP95.textContent = formatLatency(statistics.tpot_p95); // [MOD]

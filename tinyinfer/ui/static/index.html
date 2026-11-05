@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tinyInfer Console</title>
-  <link rel="stylesheet" href="/static/style.css?v=advance07-sd-v3">
+  <link rel="stylesheet" href="/static/style.css?v=advance07-sd-v4-ui">
 </head>
 <body>
   <main class="shell">
@@ -111,11 +111,13 @@
       <section class="panel controller" id="global-controller">
         <div class="panel-title">Controller</div>
         <div class="controller-content">
-          <button id="start-all" class="primary" disabled>Start All</button>
+          <div class="controller-actions">
+            <button id="start-all" class="primary" disabled>Start All</button>
+          </div>
           <div id="sd-controls" class="sd-controls" hidden>
             <div class="sd-control-row">
               <label for="sd-max-draft">Max Draft Tokens (K)</label>
-              <input id="sd-max-draft" type="range" min="1" max="32" step="1" value="5">
+              <input id="sd-max-draft" type="range" min="1" max="16" step="1" value="5">
               <strong id="sd-max-draft-value">5</strong>
             </div>
             <div id="sd-control-status" class="subtle">Global K · editable while all users are idle</div>
@@ -125,6 +127,6 @@
     </aside>
   </main>
 
-  <script src="/static/app.js?v=advance07-sd-v3"></script>
+  <script src="/static/app.js?v=advance07-sd-v4-ui"></script>
 </body>
 </html>

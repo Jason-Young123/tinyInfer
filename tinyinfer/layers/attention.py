@@ -309,7 +309,7 @@ class Attention(nn.Module):
         q_len = q_i.shape[0]
 
         # decode: q_len = 1，直接读取paged KV cache，不materialize连续K/V
-        if q_len < 1:
+        if q_len == 1:
             return flash_decoding(
                 q=q_i,
                 k_cache=cache_k,

@@ -505,13 +505,6 @@ input:disabled { opacity: .42; }
 }
 
 .controller { padding: 16px; }
-.controller-grid {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-#start-all { grid-column: span 1; }
 @media (max-width: 1250px) {
   .user-lower { grid-template-columns: 1fr; }
   .user-tools { grid-template-columns: minmax(0, 1fr) 300px; } /* [MOD] */
@@ -557,31 +550,7 @@ input:disabled { opacity: .42; }
   gap: 7px;
 }
 
-.sd-controls {
-  grid-column: span 3;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid #29303d;
-  border-radius: 11px;
-  background: #10141b;
-}
 
-.sd-control-row {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr) 28px;
-  gap: 8px;
-  align-items: center;
-  color: #aeb7c6;
-  font-size: 10px;
-}
-
-.sd-control-row strong {
-  color: #eef2f8;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-#sd-control-status { margin-top: 5px; }
 
 
 /* ===== SD statistics, live trend chart and unified global controller ===== */
@@ -726,42 +695,47 @@ input:disabled { opacity: .42; }
   margin-bottom: 12px;
 }
 
+/* Row 1: four reserved action slots; Start All occupies the first slot. */
 .controller-content {
-  display: grid;
-  grid-template-columns: 138px minmax(0, 1fr);
-  align-items: stretch;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.controller:not(.has-sd) .controller-content {
-  grid-template-columns: 1fr;
+.controller-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
 }
 
 #start-all {
+  grid-column: 1;
   width: 100%;
-  min-height: 64px;
-  padding: 10px 12px;
-  font-size: 15px;
+  min-height: 42px;
+  padding: 8px 10px;
+  font-size: 13px;
   line-height: 1.25;
   white-space: nowrap;
 }
 
+/* Row 2: K slider occupies a separate full-width row. */
 .sd-controls {
-  grid-column: auto;
+  width: 100%;
   min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 7px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  padding: 9px 11px;
+  border: 1px solid #29303d;
+  border-radius: 11px;
+  background: #10141b;
 }
 
 .sd-control-row {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr) 28px;
+  grid-template-columns: 132px minmax(0, 1fr) 32px;
   gap: 9px;
   align-items: center;
   color: #aeb7c6;
@@ -784,24 +758,21 @@ input:disabled { opacity: .42; }
 }
 
 @media (max-width: 1250px) {
-  .controller-content {
-    grid-template-columns: 120px minmax(0, 1fr);
-  }
-
   .sd-control-row {
-    grid-template-columns: 118px minmax(0, 1fr) 26px;
+    grid-template-columns: 118px minmax(0, 1fr) 28px;
     gap: 7px;
   }
 }
 
 @media (max-width: 720px) {
-  .controller-content,
-  .controller.has-sd .controller-content {
-    grid-template-columns: 1fr;
+  .controller-actions {
+    gap: 6px;
   }
 
   #start-all {
-    min-height: 48px;
+    min-height: 42px;
+    padding: 8px 6px;
+    font-size: 12px;
   }
 
   .sd-control-row {
@@ -814,5 +785,35 @@ input:disabled { opacity: .42; }
 
   .sd-chart-wrap {
     height: 160px;
+  }
+}
+
+
+/* Adjust User Panel vertical layout */
+.user-panel {
+  grid-template-rows: auto 260px auto;
+}
+
+.output {
+  height: 260px;
+  min-height: 260px;
+  max-height: 260px;
+}
+
+/* Keep Controller and Last Request compact, aligned to bottom */
+.user-lower {
+  align-items: end;
+}
+
+/* Responsive adjustment */
+@media (max-width: 1250px) {
+  .user-panel {
+      grid-template-rows: auto 230px auto;
+  }
+
+  .output {
+      height: 230px;
+      min-height: 230px;
+      max-height: 230px;
   }
 }
