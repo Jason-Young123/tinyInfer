@@ -390,7 +390,7 @@ class Attention(nn.Module):
             # q_len > 1 -> gather连续K/V后进入FlashAttention
             # q_len = 1 -> 直接进入Paged Flash-Decoding, 不materialize连续K/V
             if self.backend == "flash":
-                # _FLASH_ATTN_PROFILER.record_start()
+                _FLASH_ATTN_PROFILER.record_start()
                 out_i = self._flash_attend_uniform(
                     q_i=q_i,
                     cache_k=cache_k,
@@ -399,7 +399,7 @@ class Attention(nn.Module):
                     context_len=context_len,
                     query_start_pos=query_start,
                 )
-                # _FLASH_ATTN_PROFILER.record_end()
+                _FLASH_ATTN_PROFILER.record_end()
 
             # torch backend:
             # 始终在backend内部gather连续K/V后进入SDPA

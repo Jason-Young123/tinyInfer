@@ -297,7 +297,8 @@ void launch_flash_attention_typed(
         static_cast<int>(smem_size)
     ));
 
-    kernel_flash_attention<T><<<grid_dim, block_dim, smem_size>>>(
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(); //to get the current stream
+    kernel_flash_attention<T><<<grid_dim, block_dim, smem_size, stream>>>(
         target_seq_len,
         src_seq_len,
         q_heads,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -13,59 +14,77 @@ from tinyinfer.runtime.dynamic_engine import (
     SubmitRequest,
 )
 from tinyinfer.sampling_params import SamplingParams
-
 from tinyinfer.utils.profiler import TimeProfiler
 
 
 STATIC_DIR = Path(__file__).with_name("static")
 
 
+def run_profiler_gui(
+    refresh_interval: float = 0.2,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """
+    Run Matplotlib/GTK GUI on the calling thread.
 
-async def _profiler_window_loop(refresh_interval=0.2):
+    IMPORTANT:
+    - Call this from the process main thread.
+    - Uvicorn must run in a different thread.
+    - This function owns the GUI event loop while profiler windows are open.
+    """
+    if not TimeProfiler.PROFILER:
+        return
+
     import matplotlib
     import matplotlib.pyplot as plt
 
-    # 检查是否为支持 GUI 的 Matplotlib Backend
     backend = matplotlib.get_backend().lower()
-    if backend in {"agg", "pdf", "ps", "svg", "cairo", "pgf", "template"}:
+    non_interactive_backends = {
+        "agg", "pdf", "ps", "svg", "cairo", "pgf", "template"
+    }
+    if backend in non_interactive_backends:
         print(
-            f"[Profiler] Non-interactive backend: {backend}. "
-            "Cannot open profiler window."
+            f"[Profiler] Non-interactive Matplotlib backend: {backend}. "
+            "Profiler windows cannot be displayed.",
+            flush=True,
         )
         return
 
+    print(f"[Profiler] GUI backend: {matplotlib.get_backend()}", flush=True)
     plt.ion()
+
     window_shown = False
 
     try:
-        while True:
-            # 获取所有已经注册的 profiler
+        while should_stop is None or should_stop():
+            # If the user closes all profiler windows, stop the GUI loop.
+            # The Uvicorn server remains alive; the caller will wait for it.
+            if window_shown and not plt.get_fignums():
+                break
+
             with TimeProfiler._registry_lock:
                 profilers = list(TimeProfiler.profilers)
 
-            # 非阻塞地收集 GPU 已完成的计时结果，并更新图表
+            if not profilers:
+                break
+
+            # Drain completed CUDA Events and update each profiler figure.
             for profiler in profilers:
                 profiler.drain()
                 profiler.draw()
 
-            # 第一次创建完所有窗口后，非阻塞显示
-            if profilers and not window_shown:
+            # Create/show all figures once. draw() creates the figures.
+            if not window_shown:
                 plt.show(block=False)
                 window_shown = True
 
-            # 手动处理 GUI 事件，避免使用阻塞式 plt.pause()
-            for fig_num in plt.get_fignums():
-                fig = plt.figure(fig_num)
-                fig.canvas.flush_events()
-
-            # 让出 asyncio 事件循环
-            await asyncio.sleep(refresh_interval)
+            # Process GTK/Matplotlib events on the MAIN THREAD.
+            # This is intentionally not inside FastAPI's asyncio loop.
+            plt.pause(refresh_interval)
 
     finally:
         plt.ioff()
-
-
-
+        plt.close("all")
 
 
 class SocketHub:
@@ -131,38 +150,25 @@ def create_app(
     async def lifespan(app: FastAPI):
         hub.bind_loop()
 
-        # WebSocket 广播任务
+        # WebSocket broadcast task.
         broadcaster = asyncio.create_task(hub.broadcast_loop())
 
-        # 启动推理 Engine Worker
+        # Engine Worker remains managed by DynamicEngineService.
         service.start(hub.publish_from_thread)
-
-        # 条件启动 Profiler GUI 刷新任务
-        profiler_task = None
-        if TimeProfiler.PROFILER:
-            profiler_task = asyncio.create_task(_profiler_window_loop(refresh_interval=0.2))
 
         try:
             yield
-
         finally:
-            # 停止推理
+            # Stop Engine Worker.
             service.stop()
 
-            # 停止 Profiler GUI
-            if TimeProfiler.PROFILER: 
-                profiler_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await profiler_task
-
-            # 停止 WebSocket 广播
+            # Stop WebSocket broadcaster.
             broadcaster.cancel()
             with suppress(asyncio.CancelledError):
                 await broadcaster
 
-
-    app = FastAPI(title="tinyInfer UI", lifespan=lifespan) # 用FastAPI创建app
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static") # 指向构建网页app的static目录
+    app = FastAPI(title="tinyInfer UI", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/")
     async def index():
@@ -188,11 +194,15 @@ def create_app(
                         if raw_max is None:
                             raise ValueError("max_draft_tokens is required")
                         snapshot = service.configure_speculative(int(raw_max))
-                        await socket.send_json({"type": "sd_config", "speculative": snapshot})
+                        await socket.send_json(
+                            {"type": "sd_config", "speculative": snapshot}
+                        )
                     except (TypeError, ValueError, RuntimeError) as exc:
-                        await socket.send_json({"type": "sd_error", "message": str(exc)})
+                        await socket.send_json(
+                            {"type": "sd_error", "message": str(exc)}
+                        )
                     continue
-                        
+
                 raw_requests = (
                     payload.get("requests", [])
                     if request_type == "submit_many"
@@ -201,11 +211,13 @@ def create_app(
 
                 requests = []
                 requested_users = []
+
                 for item in raw_requests:
                     user_id = str(item.get("user_id", ""))
                     text = str(item.get("text", ""))
                     if not user_id or not text.strip():
                         continue
+
                     requested_users.append(user_id)
 
                     try:
@@ -241,6 +253,7 @@ def create_app(
                         "requested_users": requested_users,
                     }
                 )
+
         except WebSocketDisconnect:
             pass
         finally:

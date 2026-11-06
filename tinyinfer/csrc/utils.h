@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <ATen/cuda/CUDAContext.h> //ensure csrc to use the same stream
 
 #define CUDA_CHECK(call)                                                        \
     do {                                                                        \

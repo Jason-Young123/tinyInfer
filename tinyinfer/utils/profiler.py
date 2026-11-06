@@ -104,21 +104,23 @@ class TimeProfiler:
 
     # Move completed records to data_list using non-blocking Event.query()
     def drain(self):
-        with self._lock:
-            while self.record_list:
-                cpu_ms, gpu_start, gpu_end = self.record_list[0]
-
-                # GPU 尚未执行到当前 End Event, 后面的 Event 也不可能完成，直接退出
-                if gpu_end is not None and not gpu_end.query():
+        while True:
+            with self._lock:
+                if not self.record_list:
                     break
+                record = self.record_list[0]
 
-                # 当前记录已经完成，从队首移除
-                self.record_list.popleft()
+            cpu_ms, gpu_start, gpu_end = record
+            # CUDA API 调用放在锁外
+            if gpu_end is not None and not gpu_end.query():
+                break
 
-                # 计算 GPU 耗时
-                gpu_ms = (gpu_start.elapsed_time(gpu_end) if gpu_end is not None else None)
+            gpu_ms = (gpu_start.elapsed_time(gpu_end) if gpu_end is not None else None)
 
-                self.data_list.append((cpu_ms, gpu_ms))
+            with self._lock:
+                if self.record_list and self.record_list[0] is record:
+                    self.record_list.popleft()
+                    self.data_list.append((cpu_ms, gpu_ms))
 
 
 

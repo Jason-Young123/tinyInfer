@@ -385,7 +385,8 @@ void launch_flash_decoding_typed(
             + 2
         ) * sizeof(float);
 
-    kernel_flash_decoding<T><<<stage1_grid, stage1_block, stage1_smem_size>>>(
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();// to get the current stream
+    kernel_flash_decoding<T><<<stage1_grid, stage1_block, stage1_smem_size, stream>>>(
         context_len,
         q_heads,
         kv_heads,
@@ -414,7 +415,7 @@ void launch_flash_decoding_typed(
             + 2
         ) * sizeof(float);
 
-    kernel_flash_decoding_reduce<T><<<stage2_grid, stage2_block, stage2_smem_size>>>(
+    kernel_flash_decoding_reduce<T><<<stage2_grid, stage2_block, stage2_smem_size, stream>>>(
         q_heads,
         head_dim,
         num_kvcache_block,
