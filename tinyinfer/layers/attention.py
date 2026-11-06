@@ -7,6 +7,17 @@ from tinyinfer.utils.context import get_context
 from tinyinfer.layers.flash_attention import flash_attention # self-implemented flash attention
 from tinyinfer.layers.flash_decoding import flash_decoding   # self-implemented flash decoding
 
+from tinyinfer.utils.profiler import TimeProfiler
+
+
+# Shared profiler for store_kv across all Attention layers
+# 注意这里收到TimeProfiler.PROFILER的控制, 如果为False实际上会跳过注册逻辑, 但本身调用register()不会出错
+_STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache")
+_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding")
+
+
+
+
 # 一些独立的辅助函数
 def store_kv(
     cache_k: torch.Tensor,
@@ -353,6 +364,7 @@ class Attention(nn.Module):
         cache_k, cache_v = self.kv_cache.layer_kv(self.layer_idx) # 获取所有KV cache slot
 
         # 先把本轮所有新 K/V 写入 paged cache; [CRITICAL]
+        _STORE_KV_PROFILER.record_start() # 同样受到TimeProfiler.PROFILER的控制, 如果为False会静默跳过计时逻辑
         store_kv(
             cache_k,
             cache_v,
@@ -361,6 +373,7 @@ class Attention(nn.Module):
             ctx.slot_mapping,
             self.block_size,
         )
+        _STORE_KV_PROFILER.record_end()
 
         cu_q = ctx.cu_seqlens_q.tolist()
         outputs = []
@@ -377,6 +390,7 @@ class Attention(nn.Module):
             # q_len > 1 -> gather连续K/V后进入FlashAttention
             # q_len = 1 -> 直接进入Paged Flash-Decoding, 不materialize连续K/V
             if self.backend == "flash":
+                # _FLASH_ATTN_PROFILER.record_start()
                 out_i = self._flash_attend_uniform(
                     q_i=q_i,
                     cache_k=cache_k,
@@ -385,6 +399,7 @@ class Attention(nn.Module):
                     context_len=context_len,
                     query_start_pos=query_start,
                 )
+                # _FLASH_ATTN_PROFILER.record_end()
 
             # torch backend:
             # 始终在backend内部gather连续K/V后进入SDPA

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -14,8 +14,58 @@ from tinyinfer.runtime.dynamic_engine import (
 )
 from tinyinfer.sampling_params import SamplingParams
 
+from tinyinfer.utils.profiler import TimeProfiler
+
 
 STATIC_DIR = Path(__file__).with_name("static")
+
+
+
+async def _profiler_window_loop(refresh_interval=0.2):
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    # 检查是否为支持 GUI 的 Matplotlib Backend
+    backend = matplotlib.get_backend().lower()
+    if backend in {"agg", "pdf", "ps", "svg", "cairo", "pgf", "template"}:
+        print(
+            f"[Profiler] Non-interactive backend: {backend}. "
+            "Cannot open profiler window."
+        )
+        return
+
+    plt.ion()
+    window_shown = False
+
+    try:
+        while True:
+            # 获取所有已经注册的 profiler
+            with TimeProfiler._registry_lock:
+                profilers = list(TimeProfiler.profilers)
+
+            # 非阻塞地收集 GPU 已完成的计时结果，并更新图表
+            for profiler in profilers:
+                profiler.drain()
+                profiler.draw()
+
+            # 第一次创建完所有窗口后，非阻塞显示
+            if profilers and not window_shown:
+                plt.show(block=False)
+                window_shown = True
+
+            # 手动处理 GUI 事件，避免使用阻塞式 plt.pause()
+            for fig_num in plt.get_fignums():
+                fig = plt.figure(fig_num)
+                fig.canvas.flush_events()
+
+            # 让出 asyncio 事件循环
+            await asyncio.sleep(refresh_interval)
+
+    finally:
+        plt.ioff()
+
+
+
 
 
 class SocketHub:
@@ -80,13 +130,36 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.bind_loop()
+
+        # WebSocket 广播任务
         broadcaster = asyncio.create_task(hub.broadcast_loop())
-        service.start(hub.publish_from_thread) 
+
+        # 启动推理 Engine Worker
+        service.start(hub.publish_from_thread)
+
+        # 条件启动 Profiler GUI 刷新任务
+        profiler_task = None
+        if TimeProfiler.PROFILER:
+            profiler_task = asyncio.create_task(_profiler_window_loop(refresh_interval=0.2))
+
         try:
             yield
+
         finally:
+            # 停止推理
             service.stop()
+
+            # 停止 Profiler GUI
+            if TimeProfiler.PROFILER: 
+                profiler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await profiler_task
+
+            # 停止 WebSocket 广播
             broadcaster.cancel()
+            with suppress(asyncio.CancelledError):
+                await broadcaster
+
 
     app = FastAPI(title="tinyInfer UI", lifespan=lifespan) # 用FastAPI创建app
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static") # 指向构建网页app的static目录

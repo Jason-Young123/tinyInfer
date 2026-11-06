@@ -8,14 +8,15 @@ import torch
 
 
 class TimeProfiler:
+    PROFILER = True                 # Global profiling switch
     # Shared registry: all TimeProfiler instances are stored here.
     profilers = []
     _registry_lock = threading.Lock()
 
     def __init__(self):
         # self.record_list = []  # [(cpu_ms, gpu_start, gpu_end)]
-        self.record_list = deque() # [(cpu_ms, gpu_start, gpu_end)]
-        self.data_list = []    # [(cpu_ms, gpu_ms)]
+        self.record_list = deque()          # [(cpu_ms, gpu_start, gpu_end)]
+        self.data_list = deque(maxlen=1000) # [(cpu_ms, gpu_ms)]
         self._active = None    # One active measurement per profiler.
         self.stream = None
         self._lock = threading.Lock()
@@ -30,6 +31,8 @@ class TimeProfiler:
 
     # Register this profiler and capture the caller's file and line
     def register(self, name="", description=""):
+        if not TimeProfiler.PROFILER:
+            return self
         frame = inspect.currentframe()
         caller = frame.f_back if frame is not None else None
         try:
@@ -54,6 +57,8 @@ class TimeProfiler:
 
     # Record CPU start time and enqueue a CUDA start Event
     def record_start(self):
+        if not TimeProfiler.PROFILER:
+            return
         if self._active is not None:
             raise RuntimeError("Fatal: record_start() called before the previous record_end()")
 
@@ -78,6 +83,8 @@ class TimeProfiler:
 
     # Record CPU end time and enqueue the CUDA end Event without synchronizing
     def record_end(self):
+        if not TimeProfiler.PROFILER:
+            return
         if self._active is None:
             raise RuntimeError("Fatal: record_end() called without record_start()")
 
@@ -177,32 +184,3 @@ class TimeProfiler:
         self.ax.set_title(self.title, loc="left", fontsize=9)
         self.fig.subplots_adjust(right=0.78)
         self.fig.canvas.draw_idle()
-
-
-
-
-    # Display all registered plots without creating any threads
-    @classmethod
-    def show(cls, refresh_interval=0.2):
-        import matplotlib.pyplot as plt
-
-        plt.ion()
-        try:
-            with cls._registry_lock:
-                profilers = list(cls.profilers)
-
-            for profiler in profilers:
-                profiler.drain()
-                profiler.draw()
-
-            while plt.get_fignums():
-                with cls._registry_lock:
-                    profilers = list(cls.profilers)
-
-                for profiler in profilers:
-                    profiler.drain()
-                    profiler.draw()
-
-                plt.pause(refresh_interval)
-        finally:
-            plt.ioff()
