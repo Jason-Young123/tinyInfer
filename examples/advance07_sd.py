@@ -1,6 +1,5 @@
 import argparse
 from pathlib import Path
-import threading
 
 import torch
 import uvicorn
@@ -8,8 +7,7 @@ import uvicorn
 from tinyinfer import LLM
 from tinyinfer.config import Config
 from tinyinfer.runtime import DynamicEngineService
-from tinyinfer.ui.app import create_app, run_profiler_gui
-from tinyinfer.utils.profiler import TimeProfiler
+from tinyinfer.ui.app import create_app
 
 
 DEFAULT_MODEL_DIR = Path.home() / "huggingface"
@@ -33,43 +31,6 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
 
-
-def _serve_with_optional_profiler_gui(app, host: str, port: int) -> None:
-    # Uvicorn owns a background thread. Its asyncio loop never calls Matplotlib.
-    server = uvicorn.Server(
-        uvicorn.Config(app, host=host, port=port)
-    )
-    server_thread = threading.Thread(
-        target=server.run,
-        name="tinyinfer-uvicorn",
-        daemon=False,
-    )
-    server_thread.start()
-
-    try:
-        with TimeProfiler._registry_lock:
-            has_profilers = bool(TimeProfiler.profilers)
-
-        # GTK/Matplotlib GUI must run on the process main thread.
-        if TimeProfiler.PROFILER and has_profilers:
-            run_profiler_gui(
-                refresh_interval=0.2,
-                should_stop=server_thread.is_alive,
-            )
-
-        # Keep the process alive after profiler windows are closed.
-        # Ctrl+C is handled here on the main thread.
-        while server_thread.is_alive():
-            server_thread.join(timeout=0.2)
-
-    except KeyboardInterrupt:
-        print("\n[tinyInfer] Shutdown requested", flush=True)
-
-    finally:
-        # Uvicorn's signal handlers are not installed from its background thread.
-        # Request graceful shutdown explicitly, then wait for lifespan cleanup.
-        server.should_exit = True
-        server_thread.join()
 
 
 def main():
@@ -99,7 +60,7 @@ def main():
         print(f"[tinyInfer] K     : {config.max_draft_tokens}")
 
     # Model construction and its existing memory profiling happen before
-    # the Uvicorn and GUI threads/event loops are started.
+    # the Uvicorn event loop starts.
     engine = LLM(config, device="cuda", dtype=torch.bfloat16)
     service = DynamicEngineService(engine, snapshot_interval_s=0.25)
     app = create_app(service)
@@ -107,7 +68,7 @@ def main():
     ui_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     print(f"[tinyInfer] UI    : http://{ui_host}:{args.port}")
 
-    _serve_with_optional_profiler_gui(app, args.host, args.port)
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

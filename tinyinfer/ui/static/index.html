@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tinyInfer Console</title>
-  <link rel="stylesheet" href="/static/style.css?v=advance07-sd-v4-ui">
+  <link rel="stylesheet" href="/static/style.css?v=advance07-profiler-v1">
 </head>
 <body>
   <main class="shell">
@@ -108,6 +108,18 @@
         </section>
       </section>
 
+      <section class="panel profiler-panel" id="profiler-panel">
+        <div class="panel-head global-head">
+          <div>
+            <div class="panel-title">Profiler</div>
+            <div class="subtle">CPU wall time · CUDA event time</div>
+          </div>
+          <div class="request-count" id="profiler-count">0 profilers</div>
+        </div>
+        <div class="profiler-empty" id="profiler-empty">Waiting for profiler data...</div>
+        <div class="profiler-list" id="profiler-list"></div>
+      </section>
+
       <section class="panel controller" id="global-controller">
         <div class="panel-title">Controller</div>
         <div class="controller-content">
@@ -127,6 +139,6 @@
     </aside>
   </main>
 
-  <script src="/static/app.js?v=advance07-sd-v4-ui"></script>
+  <script src="/static/app.js?v=advance07-profiler-v1"></script>
 </body>
 </html>

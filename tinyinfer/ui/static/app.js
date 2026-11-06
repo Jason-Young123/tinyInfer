@@ -28,6 +28,9 @@ const sdTrendWrap = document.querySelector("#sd-chart-viewport");
 const sdTrendEmpty = document.querySelector("#sd-trend-empty");
 const sdTrendCount = document.querySelector("#sd-trend-count");
 const globalController = document.querySelector("#global-controller");
+const profilerList = document.querySelector("#profiler-list");
+const profilerEmpty = document.querySelector("#profiler-empty");
+const profilerCount = document.querySelector("#profiler-count");
 const ws = new WebSocket(`ws://${location.host}/ws`);
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -40,6 +43,7 @@ let activeBlocks = new Set();
 let cachedBlocks = new Set();
 let sdEnabled = false;
 let confirmedMaxDraftTokens = null;
+const profilerStates = new Map();
 
 function makePanel(userId, index) {
   const panel = document.createElement("section");
@@ -416,6 +420,183 @@ function svgElement(name, attributes = {}, text = null) {
   return node;
 }
 
+function ensureProfilerCard(item) {
+  const id = String(item.id);
+  let state = profilerStates.get(id);
+  if (state) {
+    state.title = item.title ?? state.title;
+    state.titleNode.textContent = state.title;
+    return state;
+  }
+
+  const card = document.createElement("section");
+  card.className = "profiler-card";
+
+  const header = document.createElement("div");
+  header.className = "profiler-card-head";
+  const titleNode = document.createElement("div");
+  titleNode.className = "profiler-card-title";
+  titleNode.textContent = item.title ?? "Profiler";
+  const countNode = document.createElement("div");
+  countNode.className = "profiler-sample-count";
+  countNode.textContent = "0 samples";
+  header.append(titleNode, countNode);
+
+  const legend = document.createElement("div");
+  legend.className = "profiler-legend";
+  legend.innerHTML = `
+    <span class="profiler-legend-item"><i class="profiler-legend-line cpu"></i>CPU wall time</span>
+    <span class="profiler-legend-item"><i class="profiler-legend-line gpu"></i>CUDA event time</span>
+  `;
+
+  const svg = svgElement("svg", {
+    viewBox: "0 0 760 210",
+    preserveAspectRatio: "none",
+    role: "img",
+    "aria-label": `Timing chart for ${item.title ?? "profiler"}`,
+    "class": "profiler-chart",
+  });
+  card.append(header, legend, svg);
+  profilerList.appendChild(card);
+
+  state = {
+    id,
+    title: item.title ?? "Profiler",
+    samples: [],
+    totalSamples: 0,
+    card,
+    titleNode,
+    countNode,
+    svg,
+  };
+  profilerStates.set(id, state);
+  return state;
+}
+
+function renderProfilerChart(state) {
+  const svg = state.svg;
+  svg.replaceChildren();
+
+  const width = 760;
+  const height = 210;
+  const margin = {top: 12, right: 14, bottom: 28, left: 48};
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const samples = state.samples;
+  const count = samples.length;
+
+  if (!count) {
+    svg.appendChild(svgElement("text", {
+      x: width / 2,
+      y: height / 2,
+      "text-anchor": "middle",
+      "class": "profiler-axis-label",
+    }, "Waiting for samples..."));
+    return;
+  }
+
+  const cpu = samples.map(sample => Number(sample[0]));
+  const gpu = samples.map(sample => sample[1] == null ? null : Number(sample[1]));
+  const finiteValues = [...cpu, ...gpu].filter(value => Number.isFinite(value));
+  const maxValue = Math.max(0.001, ...finiteValues);
+  const yMax = maxValue * 1.12;
+  const x = index => margin.left + (count <= 1 ? plotWidth / 2 : index * plotWidth / (count - 1));
+  const y = value => margin.top + plotHeight - (value / yMax) * plotHeight;
+
+  const grid = svgElement("g");
+  for (let tick = 0; tick <= 2; tick++) {
+    const value = yMax * tick / 2;
+    const yy = y(value);
+    grid.appendChild(svgElement("line", {
+      x1: margin.left, y1: yy, x2: width - margin.right, y2: yy,
+      "class": "profiler-grid-line",
+    }));
+    grid.appendChild(svgElement("text", {
+      x: margin.left - 8, y: yy + 3.5, "text-anchor": "end",
+      "class": "profiler-axis-label",
+    }, value.toFixed(yMax < 10 ? 2 : 1)));
+  }
+
+  const firstSample = state.totalSamples - count + 1;
+  const xTicks = count > 1
+    ? [0, Math.floor((count - 1) / 2), count - 1]
+    : [0];
+  for (const index of [...new Set(xTicks)]) {
+    const xx = x(index);
+    grid.appendChild(svgElement("text", {
+      x: xx, y: height - 7, "text-anchor": "middle",
+      "class": "profiler-axis-label",
+    }, String(firstSample + index)));
+  }
+  svg.appendChild(grid);
+
+  const makePath = values => {
+    let path = "";
+    let started = false;
+    values.forEach((value, index) => {
+      if (value == null || !Number.isFinite(value)) {
+        started = false;
+        return;
+      }
+      path += `${started ? "L" : "M"} ${x(index).toFixed(2)} ${y(value).toFixed(2)} `;
+      started = true;
+    });
+    return path.trim();
+  };
+
+  const cpuPath = makePath(cpu);
+  if (cpuPath) {
+    svg.appendChild(svgElement("path", {
+      d: cpuPath,
+      "class": "profiler-line cpu",
+    }));
+  }
+  const gpuPath = makePath(gpu);
+  if (gpuPath) {
+    svg.appendChild(svgElement("path", {
+      d: gpuPath,
+      "class": "profiler-line gpu",
+    }));
+  }
+}
+
+function updateProfiler(event) {
+  const incoming = event.profilers ?? [];
+  for (const item of incoming) {
+    const state = ensureProfilerCard(item);
+    const sampleStart = Number(item.sample_start ?? state.totalSamples);
+    const incomingTotal = Number(item.total_samples ?? state.totalSamples);
+
+    // Ignore queued updates older than the snapshot sent when this browser connected.
+    if (incomingTotal < state.totalSamples) continue;
+    if (incomingTotal === state.totalSamples && !item.reset) continue;
+
+    if (item.reset || sampleStart !== state.totalSamples) {
+      state.samples = [];
+    }
+
+    for (const sample of (item.samples ?? [])) {
+      state.samples.push([Number(sample[0]), sample[1] == null ? null : Number(sample[1])]);
+    }
+    if (state.samples.length > 1000) {
+      state.samples.splice(0, state.samples.length - 1000);
+    }
+
+    state.totalSamples = incomingTotal;
+    state.countNode.textContent = `${state.totalSamples.toLocaleString()} samples`;
+    renderProfilerChart(state);
+  }
+
+  const count = profilerStates.size;
+  profilerCount.textContent = `${count} profiler${count === 1 ? "" : "s"}`;
+  profilerEmpty.hidden = count > 0;
+  if (!count) {
+    profilerEmpty.textContent = event.enabled === false
+      ? "Profiler disabled (TimeProfiler.PROFILER = False)"
+      : "No profiler registered";
+  }
+}
+
 function renderSdTrend() {
   const previousScrollLeft = sdTrendWrap.scrollLeft;
   const wasAtRight = previousScrollLeft + sdTrendWrap.clientWidth >= sdTrendWrap.scrollWidth - 4;
@@ -596,6 +777,11 @@ function updateSpeculative(speculative) {
 
 ws.addEventListener("message", (message) => {
   const event = JSON.parse(message.data);
+
+  if (event.type === "profiler") {
+    updateProfiler(event);
+    return;
+  }
 
   if (event.type === "runtime") {
     updateResource(event.resource);

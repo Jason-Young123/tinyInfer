@@ -20,72 +20,6 @@ from tinyinfer.utils.profiler import TimeProfiler
 STATIC_DIR = Path(__file__).with_name("static")
 
 
-def run_profiler_gui(
-    refresh_interval: float = 0.2,
-    should_stop: Callable[[], bool] | None = None,
-) -> None:
-    """
-    Run Matplotlib/GTK GUI on the calling thread.
-
-    IMPORTANT:
-    - Call this from the process main thread.
-    - Uvicorn must run in a different thread.
-    - This function owns the GUI event loop while profiler windows are open.
-    """
-    if not TimeProfiler.PROFILER:
-        return
-
-    import matplotlib
-    import matplotlib.pyplot as plt
-
-    backend = matplotlib.get_backend().lower()
-    non_interactive_backends = {
-        "agg", "pdf", "ps", "svg", "cairo", "pgf", "template"
-    }
-    if backend in non_interactive_backends:
-        print(
-            f"[Profiler] Non-interactive Matplotlib backend: {backend}. "
-            "Profiler windows cannot be displayed.",
-            flush=True,
-        )
-        return
-
-    print(f"[Profiler] GUI backend: {matplotlib.get_backend()}", flush=True)
-    plt.ion()
-
-    window_shown = False
-
-    try:
-        while should_stop is None or should_stop():
-            # If the user closes all profiler windows, stop the GUI loop.
-            # The Uvicorn server remains alive; the caller will wait for it.
-            if window_shown and not plt.get_fignums():
-                break
-
-            with TimeProfiler._registry_lock:
-                profilers = list(TimeProfiler.profilers)
-
-            if not profilers:
-                break
-
-            # Drain completed CUDA Events and update each profiler figure.
-            for profiler in profilers:
-                profiler.drain()
-                profiler.draw()
-
-            # Create/show all figures once. draw() creates the figures.
-            if not window_shown:
-                plt.show(block=False)
-                window_shown = True
-
-            # Process GTK/Matplotlib events on the MAIN THREAD.
-            # This is intentionally not inside FastAPI's asyncio loop.
-            plt.pause(refresh_interval)
-
-    finally:
-        plt.ioff()
-        plt.close("all")
-
 
 class SocketHub:
     def __init__(self):
@@ -146,12 +80,60 @@ def create_app(
 ) -> FastAPI:
     hub = SocketHub()
 
+    async def profiler_broadcast_loop() -> None:
+        # Runs on the existing FastAPI event loop; it creates no thread/process.
+        last_sent = {
+            item["id"]: item["total_samples"]
+            for item in TimeProfiler.snapshot_all()
+        } if TimeProfiler.PROFILER else {}
+        while True:
+            if TimeProfiler.PROFILER:
+                TimeProfiler.drain_all()
+                updates = []
+                for item in TimeProfiler.snapshot_all():
+                    profiler_id = item["id"]
+                    first = item["sample_start"]
+                    total = item["total_samples"]
+                    previous = last_sent.get(profiler_id)
+
+                    if previous is None or previous < first:
+                        # New profiler, or the backend's 1000-sample ring has
+                        # advanced past samples not yet sent to the browser.
+                        samples = item["samples"]
+                        sample_start = first
+                        reset = True
+                    else:
+                        offset = previous - first
+                        samples = item["samples"][offset:]
+                        sample_start = previous
+                        reset = False
+
+                    if previous is None or reset or samples:
+                        updates.append({
+                            "id": profiler_id,
+                            "title": item["title"],
+                            "sample_start": sample_start,
+                            "total_samples": total,
+                            "samples": samples,
+                            "reset": reset,
+                        })
+                    last_sent[profiler_id] = total
+
+                if updates and hub.events is not None:
+                    hub.events.put_nowait({"type": "profiler", "profilers": updates})
+
+            await asyncio.sleep(0.2)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.bind_loop()
 
-        # WebSocket broadcast task.
+        # WebSocket broadcast and profiler telemetry tasks share this event loop.
         broadcaster = asyncio.create_task(hub.broadcast_loop())
+        profiler_task = (
+            asyncio.create_task(profiler_broadcast_loop())
+            if TimeProfiler.PROFILER else None
+        )
 
         # Engine Worker remains managed by DynamicEngineService.
         service.start(hub.publish_from_thread)
@@ -162,7 +144,11 @@ def create_app(
             # Stop Engine Worker.
             service.stop()
 
-            # Stop WebSocket broadcaster.
+            # Stop the profiler telemetry and WebSocket tasks.
+            if profiler_task is not None:
+                profiler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await profiler_task
             broadcaster.cancel()
             with suppress(asyncio.CancelledError):
                 await broadcaster
@@ -177,11 +163,18 @@ def create_app(
     @app.websocket("/ws")
     async def websocket_endpoint(socket: WebSocket):
         await socket.accept()
-        hub.clients.add(socket)
 
         snapshot = service.current_runtime_snapshot()
         if snapshot is not None:
             await socket.send_json({"type": "runtime", **snapshot})
+        if TimeProfiler.PROFILER:
+            TimeProfiler.drain_all()
+        await socket.send_json({
+            "type": "profiler",
+            "enabled": TimeProfiler.PROFILER,
+            "profilers": TimeProfiler.snapshot_all() if TimeProfiler.PROFILER else [],
+        })
+        hub.clients.add(socket)
 
         try:
             while True:
