@@ -15,7 +15,8 @@ class TimeProfiler:
 
     def __init__(self):
         self.cycle = 1                      # 被调用多少次才记录
-        self.cnt = 0
+        self.cnt = 0                        # 当前被调用了多少次
+        self.enabled = True
         self.record_list = deque()          # [(cpu_ms, gpu_start, gpu_end)]
         self.data_list = deque(maxlen=300)  # [(cpu_ms, gpu_ms)]
         self.sample_count = 0               # Total completed samples, never capped
@@ -27,8 +28,11 @@ class TimeProfiler:
         self.cuda_enabled = torch.cuda.is_available()
 
 
-    def register(self, name="", description="", cycle=1):
+    def register(self, name="", description="", cycle=1, enabled=True):
         if not TimeProfiler.PROFILER:
+            return self
+        if not enabled:
+            self.enabled = False
             return self
 
         frame = inspect.currentframe()
@@ -54,7 +58,7 @@ class TimeProfiler:
 
 
     def record_start(self):
-        if not TimeProfiler.PROFILER:
+        if not TimeProfiler.PROFILER or not self.enabled:
             return
         if self._active is not None:
             raise RuntimeError("record_start() called before the previous record_end()")
@@ -83,7 +87,7 @@ class TimeProfiler:
 
 
     def record_end(self):
-        if not TimeProfiler.PROFILER:
+        if not TimeProfiler.PROFILER or not self.enabled:
             return
         if self.cnt != 0:
             return

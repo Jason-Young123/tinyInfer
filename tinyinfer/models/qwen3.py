@@ -11,6 +11,25 @@ from tinyinfer.layers.linear import (
     QKVParallelLinear,
 )
 from tinyinfer.layers.rotary_embedding import RotaryEmbedding
+from tinyinfer.utils.profiler import TimeProfiler
+
+
+_EMBED_PROFILER = TimeProfiler().register(name="embedding_layer", description="Profiler for embedding layer", cycle=1, enabled=True)
+
+_DECODER_LAYER_PROFILER = TimeProfiler().register(name="decoder_layer", description="Profiler for entire decoder layer", cycle=1, enabled=True)
+_LAYERNORM1_PROFILER = TimeProfiler().register(name="layer_norm1", description="Profiler for layernorm1", cycle=35, enabled=True)
+_ATTN_PROFILER = TimeProfiler().register(name="attention", description="Profiler for attention", cycle=35, enabled=True)
+_MLP_PROFILER = TimeProfiler().register(name="mlp", description="Profiler for mlp", cycle=35, enabled=True)
+_LAYERNORM2_PROFILER = TimeProfiler().register(name="layer_norm2", description="Profiler for layernorm2", cycle=35, enabled=True)
+
+_ATTN_QKV_PROJ_PROFILER = TimeProfiler().register(name="qkv_proj in attn", description="Profiler for qkv_proj in attention layer", cycle=35, enabled=True)
+_ATTN_QK_NORM_PROFILER = TimeProfiler().register(name="qk_norm in attn", description="Profiler for qk_norm in attention layer", cycle=35, enabled=True)
+_ATTN_ROPE_PROFILER = TimeProfiler().register(name="rope in attn", description="Profiler for rope in attention layer", cycle=35, enabled=True)
+_ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn in attn", description="Profiler for attn in attention layer", cycle=35, enabled=True)
+_ATTN_O_PROJ_PROFILER = TimeProfiler().register(name="o_proj in attn", description="Profiler for o_proj in attention layer", cycle=35, enabled=True)
+
+
+
 
 
 # 辅助函数: 获取rope的base角频率
@@ -80,24 +99,37 @@ class Qwen3Attention(nn.Module):
     # hidden_states: [num_total_tokens, hidden_size]
     # 整体shape变化: [num_total_tokens, hidden_size] -> [num_total_tokens, hidden_size]
     def forward(self, hidden_states:torch.Tensor, positions:torch.Tensor) -> torch.Tensor:
+        _ATTN_QKV_PROJ_PROFILER.record_start()
         qkv = self.qkv_proj(hidden_states)
         q, k, v = self.qkv_proj.split_qkv(qkv)
+        _ATTN_QKV_PROJ_PROFILER.record_end()
     
         q = q.view(-1, self.num_heads, self.head_dim) # -1代表自动推导的维度
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
 
         # Qwen3 的 q_norm/k_norm 只沿每个 head 的 head_dim 做 RMSNorm
+        _ATTN_QK_NORM_PROFILER.record_start()
         q = self.q_norm(q)
         k = self.k_norm(k)
+        _ATTN_QK_NORM_PROFILER.record_end()
 
         # positions 直接来自 mixed-batch metadata
+        _ATTN_ROPE_PROFILER.record_start()
         q, k = self.rotary_emb(q, k, positions)
-        
+        _ATTN_ROPE_PROFILER.record_end()
+
         # Attention 统一处理 prefill/decode/mixed; 输出shape=[T, Hq, D]
+        _ATTN_MAIN_PROFILER.record_start()
         out = self.attn(q, k, v) # 内部会根据context内容进行token拆分(为不同seq请求)
+        _ATTN_MAIN_PROFILER.record_end()
         out = out.reshape(-1, self.q_size) # shape = [T, Hq * D]
-        return self.o_proj(out) # shape = [T, hidden_size]
+        
+        _ATTN_O_PROJ_PROFILER.record_start()
+        result = self.o_proj(out) # shape = [T, hidden_size]
+        _ATTN_O_PROJ_PROFILER.record_end()
+
+        return result
 
 
 class Qwen3MLP(nn.Module):
@@ -139,15 +171,30 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        _DECODER_LAYER_PROFILER.record_start()
         residual = hidden_states
+
+        _LAYERNORM1_PROFILER.record_start()
         hidden_states = self.input_layernorm(hidden_states)
+        _LAYERNORM1_PROFILER.record_end()
+        
+        _ATTN_PROFILER.record_start()
         hidden_states = self.self_attn(hidden_states, positions)
+        _ATTN_PROFILER.record_end()
+      
         hidden_states = residual + hidden_states
 
         residual = hidden_states
+        _LAYERNORM2_PROFILER.record_start()
         hidden_states = self.post_attention_layernorm(hidden_states)
+        _LAYERNORM2_PROFILER.record_end()
+
+        _MLP_PROFILER.record_start()
         hidden_states = self.mlp(hidden_states)
+        _MLP_PROFILER.record_end()
+        
         hidden_states = residual + hidden_states
+        _DECODER_LAYER_PROFILER.record_end()
         return hidden_states
 
 
@@ -167,8 +214,10 @@ class Qwen3Model(nn.Module):
     
     # 完整的前向传播流程
     def forward(self, input_ids:torch.Tensor, positions:torch.Tensor, output_hidden_states: bool = False):
+        _EMBED_PROFILER.record_start()
         hidden_states = self.embed_tokens(input_ids) # [num_flat_tokens] -> [num_flat_tokens, hidden_dim], 把token_id变为token向量
-        
+        _EMBED_PROFILER.record_end()
+
         if not output_hidden_states: # 正常推理路径：不保存任何中间结果
             for layer in self.layers:
                 hidden_states = layer(hidden_states, positions)

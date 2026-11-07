@@ -12,8 +12,8 @@ from tinyinfer.utils.profiler import TimeProfiler
 
 # Shared profiler for store_kv across all Attention layers
 # 注意这里收到TimeProfiler.PROFILER的控制, 如果为False实际上会跳过注册逻辑, 但本身调用register()不会出错
-_STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache", cycle = 19)
-_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding", cycle = 19)
+_STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache", cycle=35, enabled=False)
+_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding", cycle=35, enabled=False)
 
 
 

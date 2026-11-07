@@ -122,7 +122,7 @@ def create_app(
                 if updates and hub.events is not None:
                     hub.events.put_nowait({"type": "profiler", "profilers": updates})
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

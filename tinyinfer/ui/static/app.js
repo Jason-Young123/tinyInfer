@@ -479,10 +479,11 @@ function renderProfilerChart(state) {
 
   const width = 760;
   const height = 210;
-  const margin = {top: 12, right: 14, bottom: 28, left: 48};
+  // Reserve a small header inside the chart for the two average labels.
+  const margin = {top: 38, right: 18, bottom: 34, left: 64};
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
-  const samples = state.samples;
+  const samples = state.samples.slice(-200);
   const count = samples.length;
 
   if (!count) {
@@ -491,17 +492,32 @@ function renderProfilerChart(state) {
       y: height / 2,
       "text-anchor": "middle",
       "class": "profiler-axis-label",
+      style: "font-size: 14px; font-weight: 700;",
     }, "Waiting for samples..."));
     return;
   }
 
-  const cpu = samples.map(sample => Number(sample[0]));
-  const gpu = samples.map(sample => sample[1] == null ? null : Number(sample[1]));
+  const rawCpu = samples.map(sample => Number(sample[0]));
+  const rawGpu = samples.map(sample => sample[1] == null ? null : Number(sample[1]));
+  const finiteMs = [...rawCpu, ...rawGpu].filter(value => Number.isFinite(value));
+
+  // Switch to microseconds when all visible samples are below 1 ms.
+  const maxMs = Math.max(0, ...finiteMs);
+  const useMicroseconds = maxMs < 1;
+  const unitScale = useMicroseconds ? 1000 : 1;
+  const unit = useMicroseconds ? "μs" : "ms";
+  const cpu = rawCpu.map(value => value * unitScale);
+  const gpu = rawGpu.map(value => value == null ? null : value * unitScale);
   const finiteValues = [...cpu, ...gpu].filter(value => Number.isFinite(value));
-  const maxValue = Math.max(0.001, ...finiteValues);
+  const minRange = useMicroseconds ? 1 : 0.001;
+  const maxValue = Math.max(minRange, ...finiteValues);
   const yMax = maxValue * 1.12;
-  const x = index => margin.left + (count <= 1 ? plotWidth / 2 : index * plotWidth / (count - 1));
+
+  const x = index => margin.left + (
+    count <= 1 ? plotWidth / 2 : index * plotWidth / (count - 1)
+  );
   const y = value => margin.top + plotHeight - (value / yMax) * plotHeight;
+  const axisTextStyle = "font-size: 13px; font-weight: 700; font-stretch: normal; letter-spacing: 0;";
 
   const grid = svgElement("g");
   for (let tick = 0; tick <= 2; tick++) {
@@ -511,12 +527,18 @@ function renderProfilerChart(state) {
       x1: margin.left, y1: yy, x2: width - margin.right, y2: yy,
       "class": "profiler-grid-line",
     }));
+
+    const precision = yMax < 10 ? 2 : yMax < 100 ? 1 : 0;
     grid.appendChild(svgElement("text", {
-      x: margin.left - 8, y: yy + 3.5, "text-anchor": "end",
+      x: margin.left - 9,
+      y: yy + 4.5,
+      "text-anchor": "end",
       "class": "profiler-axis-label",
-    }, value.toFixed(yMax < 10 ? 2 : 1)));
+      style: axisTextStyle,
+    }, value.toFixed(precision)));
   }
 
+  // Keep absolute sample numbers on the x-axis, even after old points are dropped.
   const firstSample = state.totalSamples - count + 1;
   const xTicks = count > 1
     ? [0, Math.floor((count - 1) / 2), count - 1]
@@ -524,11 +546,25 @@ function renderProfilerChart(state) {
   for (const index of [...new Set(xTicks)]) {
     const xx = x(index);
     grid.appendChild(svgElement("text", {
-      x: xx, y: height - 7, "text-anchor": "middle",
+      x: xx,
+      y: height - 8,
+      "text-anchor": "middle",
       "class": "profiler-axis-label",
+      style: axisTextStyle,
     }, String(firstSample + index)));
   }
   svg.appendChild(grid);
+
+  // Calculate averages from the currently visible (latest up to 200) samples.
+  const cpuValues = cpu.filter(value => Number.isFinite(value));
+  const gpuValues = gpu.filter(value => value != null && Number.isFinite(value));
+  const cpuAvg = cpuValues.length
+    ? cpuValues.reduce((sum, value) => sum + value, 0) / cpuValues.length
+    : null;
+  const gpuAvg = gpuValues.length
+    ? gpuValues.reduce((sum, value) => sum + value, 0) / gpuValues.length
+    : null;
+
 
   const makePath = values => {
     let path = "";
@@ -544,11 +580,13 @@ function renderProfilerChart(state) {
     return path.trim();
   };
 
+  const lineStyle = "stroke-width: 2.2px; stroke-linecap: round; stroke-linejoin: round;";
   const cpuPath = makePath(cpu);
   if (cpuPath) {
     svg.appendChild(svgElement("path", {
       d: cpuPath,
       "class": "profiler-line cpu",
+      style: lineStyle,
     }));
   }
   const gpuPath = makePath(gpu);
@@ -556,8 +594,62 @@ function renderProfilerChart(state) {
     svg.appendChild(svgElement("path", {
       d: gpuPath,
       "class": "profiler-line gpu",
+      style: lineStyle,
     }));
   }
+
+  // Show average values in matching colors at the chart's upper-right corner.
+  const averageLabels = [];
+  const formatAverage = value =>
+    `${value.toFixed(useMicroseconds ? 1 : 3)} ${unit}`;
+  if (cpuAvg != null) {
+    averageLabels.push({
+      text: `CPU avg: ${formatAverage(cpuAvg)}`,
+      color: "#8db9ff",
+    });
+  }
+  if (gpuAvg != null) {
+    averageLabels.push({
+      text: `CUDA avg: ${formatAverage(gpuAvg)}`,
+      color: "#ff8585",
+    });
+  }
+
+  if (averageLabels.length) {
+    const labelLineHeight = 15;
+    const labelWidth = 174;
+    const labelHeight = averageLabels.length * labelLineHeight + 6;
+    const labelX = width - margin.right - labelWidth;
+    const labelY = 3;
+
+    svg.appendChild(svgElement("rect", {
+      x: labelX,
+      y: labelY,
+      width: labelWidth,
+      height: labelHeight,
+      rx: 4,
+      style: "fill: #11141b; fill-opacity: 0.88; stroke: #343944; stroke-width: 0.6px;",
+    }));
+
+    averageLabels.forEach((item, index) => {
+      svg.appendChild(svgElement("text", {
+        x: width - margin.right - 7,
+        y: labelY + 14 + index * labelLineHeight,
+        "text-anchor": "end",
+        style: `fill: ${item.color}; font-size: 11.5px; font-weight: 700; letter-spacing: 0;`,
+      }, item.text));
+    });
+  }
+
+  // Explicit y-axis title makes the current unit unambiguous.
+  svg.appendChild(svgElement("text", {
+    x: 15,
+    y: height / 2,
+    transform: `rotate(-90 15 ${height / 2})`,
+    "text-anchor": "middle",
+    "class": "profiler-axis-label",
+    style: "font-size: 13px; font-weight: 700; letter-spacing: 0;",
+  }, `Time (${unit})`));
 }
 
 function updateProfiler(event) {
@@ -578,8 +670,8 @@ function updateProfiler(event) {
     for (const sample of (item.samples ?? [])) {
       state.samples.push([Number(sample[0]), sample[1] == null ? null : Number(sample[1])]);
     }
-    if (state.samples.length > 1000) {
-      state.samples.splice(0, state.samples.length - 1000);
+    if (state.samples.length > 200) {
+      state.samples.splice(0, state.samples.length - 200);
     }
 
     state.totalSamples = incomingTotal;
