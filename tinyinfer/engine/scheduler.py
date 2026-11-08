@@ -111,7 +111,7 @@ class Scheduler:
                     start_pos=start,
                     num_tokens=1,
                     is_prefill=False,
-                    sample_after=True,
+                    sample_after=True, # 默认decode都是需要sample的, 但SD模式下draft/target对于decode seq每一个位置是否采样还依赖model_runner中的逻辑
                 )
             )
             token_budget -= parallel_verify_tokens

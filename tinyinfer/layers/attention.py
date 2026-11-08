@@ -12,16 +12,20 @@ from tinyinfer.utils.profiler import TimeProfiler
 
 # Shared profiler for store_kv across all Attention layers
 # 注意这里收到TimeProfiler.PROFILER的控制, 如果为False实际上会跳过注册逻辑, 但本身调用register()不会出错
-_STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache", cycle=35, enabled=False)
-_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding", cycle=35, enabled=False)
+_STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache", cycle=35, enabled=True)
+_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding", cycle=35, enabled=True)
+
+_FA_PROFILER = TimeProfiler().register(name="flash attention", description="Flash attention only", cycle=35, enabled=True)
+_KV_GATHER_PROFILER = TimeProfiler().register(name="kv gather", description="Gather KV cache", cycle=35, enabled=True)
+_FD_PROFILER = TimeProfiler().register(name="flash decoding", description="Flash decoding only", cycle=35, enabled=True)
 
 
 
 
 # 一些独立的辅助函数
 def store_kv(
-    cache_k: torch.Tensor,
-    cache_v: torch.Tensor,
+    cache_k: torch.Tensor, # [num_blocks, block_size, num_heads, head_dim]
+    cache_v: torch.Tensor, # [num_blocks, block_size, num_heads, head_dim]
     k: torch.Tensor,
     v: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -32,14 +36,22 @@ def store_kv(
     # 比如seq0刚完成prefill需要存4个token对应的kv cache, 而seq1/2则都是在decode阶段、只需存储1个token;
     # 则此时num_tokens = 4 + 1 + 1 = 6
     if k.shape != v.shape:
-        raise ValueError("k/v shape mismatch")
+        raise ValueError("Fatal: k/v shape mismatch")
     if k.shape[0] != slot_mapping.numel():
-        raise ValueError("slot_mapping length must equal token count")
-    for i, slot in enumerate(slot_mapping.tolist()):
-        block = slot // block_size
-        offset = slot % block_size
-        cache_k[block, offset].copy_(k[i])
-        cache_v[block, offset].copy_(v[i])
+        raise ValueError("Fatal: slot_mapping length must equal token count")
+    
+    Hkv, D = k.shape[1:]
+    flat_k = cache_k.view(-1, Hkv, D)
+    flat_v = cache_v.view(-1, Hkv, D)
+
+    flat_k.index_copy_(0, slot_mapping, k) # TODO: 将这里的k/v的写入合并为一个融合算子
+    flat_v.index_copy_(0, slot_mapping, v)
+
+    #for i, slot in enumerate(slot_mapping):
+    #    block = slot // block_size
+    #    offset = slot % block_size
+    #    cache_k[block, offset].copy_(k[i])
+    #    cache_v[block, offset].copy_(v[i])
 
 
 # 针对某个请求seq获取其所有context对应的K/V cache
@@ -321,7 +333,8 @@ class Attention(nn.Module):
 
         # decode: q_len = 1，直接读取paged KV cache，不materialize连续K/V
         if q_len == 1:
-            return flash_decoding(
+            _FD_PROFILER.record_start()
+            result =  flash_decoding(
                 q=q_i,
                 k_cache=cache_k,
                 v_cache=cache_v,
@@ -330,8 +343,11 @@ class Attention(nn.Module):
                 kvcache_block_size=self.block_size,
                 scale=self.scale,
             )
+            _FD_PROFILER.record_end()
+            return result
 
         # prefill/chunked prefill: q_len > 1，暂时仍materialize连续历史K/V
+        _KV_GATHER_PROFILER.record_start()
         k_hist = gather_sequence_kv(
             cache_k,
             block_table,
@@ -345,8 +361,10 @@ class Attention(nn.Module):
             context_len,
             self.block_size,
         )
+        _KV_GATHER_PROFILER.record_end()
 
-        return flash_attention(
+        _FA_PROFILER.record_start()
+        result = flash_attention(
             q_i,
             k_hist,
             v_hist,
@@ -354,6 +372,9 @@ class Attention(nn.Module):
             scale=self.scale,
             is_causal=True,
         )
+        _FA_PROFILER.record_end()
+
+        return result
 
 
 
@@ -375,14 +396,15 @@ class Attention(nn.Module):
         )
         _STORE_KV_PROFILER.record_end()
 
-        cu_q = ctx.cu_seqlens_q.tolist()
+        cu_q = ctx.cu_seqlens_q
+        
         outputs = []
 
         for i in range(len(cu_q) - 1): # 对这一轮所有需要处理的seq请求逐一调用attention计算
             qs, qe = cu_q[i], cu_q[i + 1]
             q_i = q[qs:qe]
 
-            context_len = int(ctx.context_lens[i].item())
+            context_len = ctx.context_lens[i]
             q_len = qe - qs
             query_start = context_len - q_len
 
@@ -400,7 +422,6 @@ class Attention(nn.Module):
                     query_start_pos=query_start,
                 )
                 _FLASH_ATTN_PROFILER.record_end()
-
             # torch backend:
             # 始终在backend内部gather连续K/V后进入SDPA
             elif self.backend == "torch":
@@ -412,10 +433,11 @@ class Attention(nn.Module):
                     context_len=context_len,
                     query_start_pos=query_start,
                 )
-
             else:
                 raise ValueError(f"unsupported attention backend: {self.backend}")
 
             outputs.append(out_i)
 
-        return torch.cat(outputs, dim=0) # shape = [num_total_tokens, num_heads, head_dim]
+        result = torch.cat(outputs, dim=0) # shape = [num_total_tokens, num_heads, head_dim]
+
+        return result

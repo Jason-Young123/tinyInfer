@@ -6,15 +6,15 @@ import torch
 #（prefill/decode模式、变长序列长度、KV cache位置等）传递给模型 forward 和 Attention kernel?
 @dataclass(slots=True) # dataclass无需手动写__init__构造函数; slots=True可以防止误加成员变量, 从而维护类结构静态稳定
 class Context:
-    is_prefill:   torch.Tensor | None = None # 每个seq是否还在prefill阶段
-    is_sample:    torch.Tensor | None = None # 每个seq推理结束之后是否需要采样下一个token; 对于decode和最后一次chunked prefill需要, 而过程中的prefill chunk则不需要
-    q_lens:       torch.Tensor | None = None # 本轮这条seq新增计算多少 token
-    cu_seqlens_q: torch.Tensor | None = None # cumsum of seqlen_q, 用于存放各个seq的边界信息
-    cu_seqlens_k: torch.Tensor | None = None # cumsum of seqlen_k, 用于存放各个seq的边界信息
-    max_seqlen_q: int = 0                    # max seqlen_q, 用于fA中拼batch; 注意seqlen_q代表这轮prefill中实际需要新计算的token数目
-    max_seqlen_k: int = 0                    # max seqlen_k, 用于fA中拼batch; seqlen_k代表这轮prefill中attention需要涉及的完整token数目
+    # is_prefill:   torch.Tensor | None = None # 每个seq是否还在prefill阶段; deprecated
+    # is_sample:    torch.Tensor | None = None # 每个seq推理结束之后是否需要采样下一个token; 对于decode和最后一次chunked prefill需要, 而过程中的prefill chunk则不需要
+    # q_lens:       torch.Tensor | None = None # 本轮这条seq新增计算多少 token
+    cu_seqlens_q: list[int] | None = None # cumsum of seqlen_q, 用于存放各个seq的边界信息
+    # cu_seqlens_k: torch.Tensor | None = None # cumsum of seqlen_k, 用于存放各个seq的边界信息
+    # max_seqlen_q: int = 0                    # max seqlen_q, 用于fA中拼batch; 注意seqlen_q代表这轮prefill中实际需要新计算的token数目
+    # max_seqlen_k: int = 0                    # max seqlen_k, 用于fA中拼batch; seqlen_k代表这轮prefill中attention需要涉及的完整token数目
     slot_mapping: torch.Tensor | None = None # 每个token的kv cache需要写入的物理位置(索引),用于attention时写入kv cache 
-    context_lens: torch.Tensor | None = None # 当前已经生成的token数目, 用于attention时gather kv cache; 注意仅有block table不够, 因为无法提供边界block是否已满的信息
+    context_lens: list[int] | None = None # 当前已经生成的token数目, 用于attention时gather kv cache; 注意仅有block table不够, 因为无法提供边界block是否已满的信息
     block_tables: torch.Tensor | None = None
 
     

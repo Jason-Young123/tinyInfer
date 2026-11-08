@@ -135,7 +135,7 @@ class TimeProfiler:
 
     @classmethod
     def snapshot_all(cls):
-        """Return the latest (at most 1000) samples for each registered profiler."""
+        """Return the latest (at most 300) samples for each registered profiler."""
         with cls._registry_lock:
             profilers = list(cls.profilers)
 

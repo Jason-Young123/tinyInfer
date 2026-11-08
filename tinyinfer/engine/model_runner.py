@@ -104,14 +104,10 @@ def _profile_one_model_peak(
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
         set_context(    # 准备单已请求batch的metadata
-            q_lens=torch.tensor([n], dtype=torch.int32, device=device),
-            context_lens=torch.tensor([n], dtype=torch.int32, device=device),
-            cu_seqlens_q=torch.tensor([0, n], dtype=torch.int32, device=device),
-            max_seqlen_q=n,
+            context_lens=[n],
+            cu_seqlens_q=[0, n],
             slot_mapping=torch.arange(n, dtype=torch.long, device=device),
             block_tables=torch.arange(num_dummy_blocks, dtype=torch.int32, device=device).unsqueeze(0),
-            is_prefill=torch.tensor([True], dtype=torch.bool, device=device),
-            is_sample=torch.tensor([True], dtype=torch.bool, device=device),
         )
         with torch.inference_mode():
             hidden, _ = model(input_ids, positions, output_hidden_states=False)
@@ -290,7 +286,8 @@ class ModelRunner:
         self._verification_rounds = 0
 
 
-    # 对多个seq准备prefill workload; deprecated
+    # prepare prefill v.s. prepare decode: 
+    # 1. prepare prefill
     # 假设一个batch包含3个prefill请求, seq0 = [A, B, C, D, | E, F], seq1 = [a, b, | c, d], seq2 = [|1, 2, 3]; (|右侧代表尚未进入prefix cache的部分)
     # 则执行完prepare_prefill之后:
     #  input_ids = [E, F, c, d, 1, 2, 3]
@@ -298,52 +295,8 @@ class ModelRunner:
     #  slot_mapping = [81, 82, 23, 24, 56, 57, 58]
     #  q_lens = [2, 2, 3]; k_lens = [6, 4, 3]
     #  cu_q = [0, 2, 4, 7]; cu_k = [0, 6, 10, 13]
-    def prepare_prefill(self, seqs): 
-        input_ids = [] # 真正送给模型计算的 token, 而非完整prompt; 多个seq请求直接拼接而成
-        positions = [] # 这些 token 在原始 sequence 中的位置; 多个seq请求直接拼接而成
-        slot_mapping = [] # 注意这里仅代表本批prefill最终写入KV cache的slot, 不包含读取的prefix cache对应的slot
-        q_lens = []    # 每个seq本次prefill需要真正计算的长度
-        k_lens = []    # 每个seq本次attention看到的历史token长度
-
-        for seq in seqs:
-            start = seq.num_prefix_cached_tokens # 已经位于prefix cache中的token数目
-            end = seq.num_tokens
-            tokens = seq.token_ids[start:end]
-            pos = list(range(start, end)) # 真正需要prefill的token下标范围
-
-            input_ids.extend(tokens)
-            positions.extend(pos)
-            slot_mapping.extend(token_to_slot(seq, p) for p in pos)
-
-            q_lens.append(len(tokens))
-            k_lens.append(end)
-
-        def prefix_sum(lengths):
-            out = [0]
-            for x in lengths:
-                out.append(out[-1] + x)
-            return out
-
-        cu_q = prefix_sum(q_lens) # 导出flashAttention所需要的cumsum形式
-        cu_k = prefix_sum(k_lens)
-
-        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
-        positions = torch.tensor(positions, dtype=torch.long, device=self.device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=self.device)
-        cu_q = torch.tensor(cu_q, dtype=torch.int32, device=self.device)
-        cu_k = torch.tensor(cu_k, dtype=torch.int32, device=self.device)
-
-        set_context(
-            is_prefill=True,
-            cu_seqlens_q=cu_q,
-            cu_seqlens_k=cu_k,
-            max_seqlen_q=max(q_lens, default=0),
-            max_seqlen_k=max(k_lens, default=0),
-            slot_mapping=slot_mapping,
-        )
-        return input_ids, positions
-
-    # 对多个seq准备decode workload; deprecated
+    
+    # 2. prepare decode
     # 假设一个batch同样包含3个decode请求, seq0 = [A, B, C], seq1 = [a, b, c, d], seq2 = [1, 2];
     # 则执行完prepare_docode之后(假设block_size = 2):
     #  input_ids = [C, d, 2]
@@ -351,40 +304,6 @@ class ModelRunner:
     #  slot_mapping = [60, 71, 12]
     #  context_lens = [3, 4, 2]
     #  block_tables = [[11, 12], [34, 35], [59, -1]], 所有历史token对应的KV Cache block编号
-    def prepare_decode(self, seqs):
-        input_ids = []
-        positions = []
-        slot_mapping = []
-        context_lens = []
-        block_tables = []
-
-        max_blocks = max(len(seq.block_table) for seq in seqs)
-
-        for seq in seqs:
-            pos = seq.num_tokens - 1
-            input_ids.append(seq.last_token)
-            positions.append(pos)
-            slot_mapping.append(token_to_slot(seq, pos))
-            context_lens.append(seq.num_tokens)
-
-            table = list(seq.block_table)
-            table.extend([-1] * (max_blocks - len(table))) # 末尾补-1, 代表这个seq比较短、后续block用不到
-            block_tables.append(table)
-
-        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
-        positions = torch.tensor(positions, dtype=torch.long, device=self.device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=self.device)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, device=self.device)
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, device=self.device)
-
-        set_context(
-            is_prefill=False,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            block_tables=block_tables,
-        )
-        return input_ids, positions
-
 
 
     # 真正的统一调度接口, 实现了mixed batching; 唯一目的就是利用schedule挑选出来的seq去设置context
@@ -396,8 +315,6 @@ class ModelRunner:
         slot_mapping: list[int] = []
         q_lens: list[int] = []
         context_lens: list[int] = []
-        is_prefill: list[bool] = []
-        is_sample: list[bool] = []
         block_tables: list[list[int]] = []
         max_blocks = max(len(item.seq.block_table) for item in output.items) # 注意这里的block已经被预分配
 
@@ -418,8 +335,6 @@ class ModelRunner:
 
             q_lens.append(item.num_tokens)      # 每个seq请求本轮输入tokens的数目
             context_lens.append(end)            # 每个seq请求本轮前向传播完毕后,总上下文长度
-            is_prefill.append(item.is_prefill)  # 每个seq请求本轮是否处于prefill阶段
-            is_sample.append(item.sample_after) # 每个seq请求本轮是否需要采样下一个token
 
             table = list(seq.block_table)       # 每个seq请求本轮涉及到的block_table, 且长度向max_len对齐, 末尾补-1
             table.extend([-1] * (max_blocks - len(table)))
@@ -433,26 +348,10 @@ class ModelRunner:
         positions_ret = torch.tensor(positions, dtype=torch.long, device=self.device)   # [num_flat_tokens]
 
         set_context(
-            q_lens=torch.tensor(q_lens, dtype=torch.int32, device=self.device),
-            context_lens=torch.tensor( # [num_seq]
-                context_lens, dtype=torch.int32, device=self.device
-            ),
-            cu_seqlens_q=torch.tensor( # [num_seq + 1]
-                cu_q, dtype=torch.int32, device=self.device
-            ),
-            max_seqlen_q=max(q_lens, default=0),
-            slot_mapping=torch.tensor(
-                slot_mapping, dtype=torch.long, device=self.device
-            ),
-            block_tables=torch.tensor(
-                block_tables, dtype=torch.int32, device=self.device
-            ),
-            is_prefill=torch.tensor( # [num_seq]
-                is_prefill, dtype=torch.bool, device=self.device
-            ),
-            is_sample=torch.tensor( # [num_seq]
-                is_sample, dtype=torch.bool, device=self.device
-            ),
+            context_lens=context_lens, # [num_seq]
+            cu_seqlens_q=cu_q, # [num_seq + 1]
+            slot_mapping=torch.tensor(slot_mapping, dtype=torch.long, device=self.device),
+            block_tables=torch.tensor(block_tables, dtype=torch.int32, device=self.device)
         )
 
         return input_ids_ret, positions_ret
@@ -491,7 +390,7 @@ class ModelRunner:
             if not sample_items: # 没有采样需求, 说明当前batch全都是partial prefill, 无final prefill或者decode的seq请求
                 return {}
 
-            idx = torch.tensor(sample_flat_indices, dtype=torch.long, device=hidden_states.device) # [sampled_seq], 即这一批中is_sample=True的seq请求总数
+            idx = torch.tensor(sample_flat_indices, dtype=torch.long, device=hidden_states.device) # [sampled_seq], 即这一批中sample_after=True的seq请求总数
             sample_hidden = hidden_states.index_select(0, idx) # [sampled_seq, hidden_dim]
             logits = self.model.compute_logits(sample_hidden)  # [sampled_seq, vocab_size]
 
@@ -662,14 +561,10 @@ class ModelRunner:
 
                 try: # 对y个decode请求打包, set_context然后进行forward
                     set_context(
-                        q_lens=torch.ones(batch_size, dtype=torch.int32, device=self.device), # y个1
-                        context_lens=torch.tensor(context_lens, dtype=torch.int32, device=self.device),
-                        cu_seqlens_q=torch.arange(batch_size + 1, dtype=torch.int32, device=self.device),
-                        max_seqlen_q=1,
+                        context_lens=context_lens,
+                        cu_seqlens_q=list(range(batch_size + 1)),
                         slot_mapping=torch.tensor(slot_mapping, dtype=torch.long, device=self.device),
                         block_tables=torch.tensor(block_tables, dtype=torch.int32, device=self.device),
-                        is_prefill=torch.zeros(batch_size, dtype=torch.bool, device=self.device), # 所有seq都不是prefill
-                        is_sample=torch.full((batch_size,), depth < K, dtype=torch.bool, device=self.device), # 仅前 K 轮需要采样
                     )
 
                     # 进行forward
@@ -710,8 +605,6 @@ class ModelRunner:
         slot_mapping_flat: list[int] = []
         q_lens: list[int] = []
         context_lens: list[int] = []
-        is_prefill: list[bool] = []
-        is_sample: list[bool] = []
         block_tables: list[list[int]] = []      # [num_seq]
         flat_sample_mask: list[bool] = []       # [num_flat_tokens]
         flat_sample_mask_cumsum: list[int] = [0] # 每个item对应的sample logits行前缀和
@@ -733,8 +626,6 @@ class ModelRunner:
 
                 q_lens.append(item.num_tokens)      # 这里是每个seq请求对应一个参数
                 context_lens.append(end)
-                is_prefill.append(True)
-                is_sample.append(item.sample_after)
                 table = list(seq.block_table)
                 table.extend([-1] * (max_blocks - len(table)))
                 block_tables.append(table)
@@ -757,8 +648,6 @@ class ModelRunner:
 
                 q_lens.append(verify_len)               # 这几个为seq-level metadata, 长度为y
                 context_lens.append(start + verify_len)
-                is_prefill.append(False)
-                is_sample.append(True)
                 table = list(seq.block_table)
                 table.extend([-1] * (max_blocks - len(table)))
                 block_tables.append(table)
@@ -773,14 +662,10 @@ class ModelRunner:
 
         try:
             set_context( # 准备context(metadata)
-                q_lens=torch.tensor(q_lens, dtype=torch.int32, device=self.device),
-                context_lens=torch.tensor(context_lens, dtype=torch.int32, device=self.device),
-                cu_seqlens_q=torch.tensor(cu_q, dtype=torch.int32, device=self.device),
-                max_seqlen_q=max(q_lens),
+                context_lens=context_lens,
+                cu_seqlens_q=cu_q,
                 slot_mapping=torch.tensor(slot_mapping_flat, dtype=torch.long, device=self.device),
                 block_tables=torch.tensor(block_tables, dtype=torch.int32, device=self.device),
-                is_prefill=torch.tensor(is_prefill, dtype=torch.bool, device=self.device),
-                is_sample=torch.tensor(is_sample, dtype=torch.bool, device=self.device),
             )
 
             # 准备input数据

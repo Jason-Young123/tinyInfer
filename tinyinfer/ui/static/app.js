@@ -670,8 +670,8 @@ function updateProfiler(event) {
     for (const sample of (item.samples ?? [])) {
       state.samples.push([Number(sample[0]), sample[1] == null ? null : Number(sample[1])]);
     }
-    if (state.samples.length > 200) {
-      state.samples.splice(0, state.samples.length - 200);
+    if (state.samples.length > 150) {
+      state.samples.splice(0, state.samples.length - 150);
     }
 
     state.totalSamples = incomingTotal;
