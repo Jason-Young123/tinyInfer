@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from tinyinfer.utils.extension import load_extension
+
 
 
 class LinearBase(nn.Module):
@@ -8,17 +10,16 @@ class LinearBase(nn.Module):
         super().__init__()
         self.in_features = in_features   # 输入shape的最后一维大小
         self.out_features = out_features # 输出shape的最后一维大小
-        self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, dtype=dtype, device=device)
-        )
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype, device=device))
         if bias:
-            self.bias = nn.Parameter(
-                torch.empty(out_features, dtype=dtype, device=device)
-            )
+            self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
         else:
             self.register_parameter("bias", None)
     
-    def forward(self, x): # y = x@W.T + b
+    def forward(self, x): # y = x@W.T + b; x.shape=[.., in_features]; weight.shape=[out_features, in_features]; bias.shape=[out_features]
+        #if not self.bias:
+        #    return load_extension().linear_forward_cutlass(x, self.weight)
+        
         return F.linear(x, self.weight, self.bias)
 
 

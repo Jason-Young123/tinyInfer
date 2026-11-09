@@ -1,7 +1,8 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
-// defined in: flash_attention.cu
+
+/**************************** defined in: flash_attention.cu ****************************/
 extern "C" void flash_attention_forward_cuda(
     const void* q,
     const void* k,
@@ -98,7 +99,8 @@ torch::Tensor flash_attention_forward(
 
 
 
-// defined in: flash_decoding.cu
+
+/**************************** defined in: flash_decoding.cu ****************************/
 extern "C" void flash_decoding_forward_cuda(
     const void* q,
     const void* k_cache,
@@ -237,7 +239,8 @@ torch::Tensor flash_decoding_forward(
 
 
 
-// defined in: rmsnorm.cu
+
+/**************************** defined in: rmsnorm.cu ****************************/
 extern "C" void rmsnorm_forward_cuda(
     const void* input,
     size_t hidden_dim,
@@ -297,6 +300,7 @@ torch::Tensor rmsnorm_forward(
 
 
 
+/**************************** defined in: rope.cu ****************************/
 extern "C" void rope_forward_cuda(
     const void* q,         // [T, Hq, D]
     const void* k,         // [T, Hk, D]
@@ -416,7 +420,57 @@ std::tuple<torch::Tensor, torch::Tensor> rope_forward(
 
 
 
+/**************************** defined in: linear.cu ****************************/
+extern "C" void linear_forward_cutlass_(
+    const void* X,
+    const void* W,
+    size_t M,
+    size_t K,
+    size_t N,
+    void* O,
+    int dtype_code
+);
 
+torch::Tensor linear_forward_cutlass(
+    torch::Tensor X,
+    torch::Tensor W
+) {
+    TORCH_CHECK(X.is_cuda() && W.is_cuda(), "X and W must be CUDA tensors");
+    TORCH_CHECK(X.dim() == 2 && W.dim() == 2, "X and W must be 2D tensors");
+    TORCH_CHECK(X.is_contiguous() && W.is_contiguous(), "X and W must be contiguous");
+    TORCH_CHECK(X.device() == W.device(), "X and W must be on the same device");
+    TORCH_CHECK(X.scalar_type() == W.scalar_type(), "X and W must have the same dtype");
+    TORCH_CHECK(X.scalar_type() == at::kHalf || X.scalar_type() == at::kBFloat16, "Only FP16 and BF16 are supported");
+
+    auto M = X.size(0);
+    auto K = X.size(1);
+    auto N = W.size(0);
+
+    TORCH_CHECK(W.size(1) == K, "K dimension mismatch");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+    auto O = torch::empty({static_cast<int64_t>(M), static_cast<int64_t>(N)}, X.options());
+
+    int dtype_code;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else {
+        dtype_code = 1;
+    }
+
+    linear_forward_cutlass_(
+        X.data_ptr(),
+        W.data_ptr(),
+        M,
+        K,
+        N,
+        O.data_ptr(),
+        dtype_code
+    );
+
+    return O;
+}
 
 
 
@@ -467,6 +521,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("k"),
         pybind11::arg("positions"),
         pybind11::arg("inv_freq")
+    );
+
+    m.def(
+        "linear_forward_cutlass",
+        &linear_forward_cutlass,
+        "CUTLASS Linear Forward",
+        pybind11::arg("X"),
+        pybind11::arg("W")
     );
 }
 

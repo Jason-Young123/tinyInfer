@@ -17,10 +17,10 @@ from tinyinfer.utils.profiler import TimeProfiler
 _EMBED_PROFILER = TimeProfiler().register(name="embedding_layer", description="Profiler for embedding layer", cycle=1, enabled=False)
 
 _DECODER_LAYER_PROFILER = TimeProfiler().register(name="decoder_layer", description="Profiler for entire decoder layer", cycle=35, enabled=False)
-_LAYERNORM1_PROFILER = TimeProfiler().register(name="layer_norm1", description="Profiler for layernorm1", cycle=35, enabled=False)
+_LAYERNORM1_PROFILER = TimeProfiler().register(name="layer_norm1", description="Profiler for layernorm1", cycle=35, enabled=True)
 _ATTN_PROFILER = TimeProfiler().register(name="attention", description="Profiler for attention", cycle=35, enabled=True)
-_MLP_PROFILER = TimeProfiler().register(name="mlp", description="Profiler for mlp", cycle=35, enabled=False)
-_LAYERNORM2_PROFILER = TimeProfiler().register(name="layer_norm2", description="Profiler for layernorm2", cycle=35, enabled=False)
+_MLP_PROFILER = TimeProfiler().register(name="mlp", description="Profiler for mlp", cycle=35, enabled=True)
+_LAYERNORM2_PROFILER = TimeProfiler().register(name="layer_norm2", description="Profiler for layernorm2", cycle=35, enabled=True)
 
 _ATTN_QKV_PROJ_PROFILER = TimeProfiler().register(name="qkv_proj in attn", description="Profiler for qkv_proj in attention layer", cycle=35, enabled=True)
 _ATTN_QK_NORM_PROFILER = TimeProfiler().register(name="qk_norm in attn", description="Profiler for qk_norm in attention layer", cycle=35, enabled=True)
