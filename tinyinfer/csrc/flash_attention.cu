@@ -1,31 +1,6 @@
 #include "utils.h"
 
 
-template <typename T>
-__device__ inline T warp_reduce_sum(T val) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-
-template <typename T>
-__device__ inline T warp_reduce_max(T val) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        T tmp = __shfl_down_sync(0xffffffff, val, offset);
-        val = val > tmp ? val : tmp;
-    }
-    return val;
-}
-
-
-
-
-
-
 //对应flash attention v2原文算法, block采用三维布局
 template <typename T>
 __global__ void kernel_flash_attention( 

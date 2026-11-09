@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from tinyinfer.utils.extension import load_extension
 
 
 class RotaryEmbedding(nn.Module):
@@ -109,23 +110,52 @@ class RotaryEmbedding(nn.Module):
         k: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if q.ndim != 3 or k.ndim != 3:
-            raise ValueError("q/k must be [num_tokens, num_heads, head_dim]")
-        if positions.ndim != 1:
-            raise ValueError("positions must be a 1-D tensor")
-        if q.shape[0] != k.shape[0] or q.shape[0] != positions.numel():
-            raise ValueError("q, k and positions must have the same token count")
-        if q.shape[-1] != self.head_dim or k.shape[-1] != self.head_dim:
-            raise ValueError("q/k head_dim mismatch")
+        # version1: pytorch对照组
+        # if q.ndim != 3 or k.ndim != 3:
+        #     raise ValueError("q/k must be [num_tokens, num_heads, head_dim]")
+        # if positions.ndim != 1:
+        #     raise ValueError("positions must be a 1-D tensor")
+        # if q.shape[0] != k.shape[0] or q.shape[0] != positions.numel():
+        #     raise ValueError("q, k and positions must have the same token count")
+        # if q.shape[-1] != self.head_dim or k.shape[-1] != self.head_dim:
+        #     raise ValueError("q/k head_dim mismatch")
 
-        positions_fp32 = positions.to(device=q.device, dtype=torch.float32)
-        inv_freq = self.inv_freq.to(device=q.device, dtype=torch.float32)
+        # positions_fp32 = positions.to(device=q.device, dtype=torch.float32)
+        # inv_freq = self.inv_freq.to(device=q.device, dtype=torch.float32)
 
-        # [T] outer [rotary_dim/2] -> [T, rotary_dim/2]
-        freqs = torch.outer(positions_fp32, inv_freq)
-        cos = freqs.cos()
-        sin = freqs.sin()
+        # # [T] outer [rotary_dim/2] -> [T, rotary_dim/2]
+        # freqs = torch.outer(positions_fp32, inv_freq)
+        # cos = freqs.cos()
+        # sin = freqs.sin()
 
-        q = self._apply_rotary(q, cos, sin)
-        k = self._apply_rotary(k, cos, sin)
-        return q, k
+        # q = self._apply_rotary(q, cos, sin)
+        # k = self._apply_rotary(k, cos, sin)
+        # return q, k
+
+        # version2: self-implemented kernel
+        q = q.contiguous()
+        k = k.contiguous()
+        positions = positions.contiguous()
+
+        q_rot, k_rot = load_extension().rope_forward(
+            q=q,
+            k=k,
+            positions=positions,
+            inv_freq=self.inv_freq
+        )
+
+        return q_rot, k_rot
+
+
+        # version3: flashinfer
+        # q_rot, k_rot = flashinfer.rope.apply_rope_pos_ids(
+        #     q.contiguous(),
+        #     k.contiguous(),
+        #     positions.contiguous(),
+        #     rotary_dim=self.rotary_dim,
+        #     interleave=False,
+        #     rope_scale=1.0,
+        #     rope_theta=self.base,
+        # )
+
+        # return q_rot, k_rot

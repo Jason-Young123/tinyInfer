@@ -13,6 +13,8 @@ setup(
                 "tinyinfer/csrc/bind.cpp",
                 "tinyinfer/csrc/flash_attention.cu",
                 "tinyinfer/csrc/flash_decoding.cu",
+                "tinyinfer/csrc/rmsnorm.cu",
+                "tinyinfer/csrc/rope.cu"
             ],
             extra_compile_args={
                 "cxx": ["-O3"],

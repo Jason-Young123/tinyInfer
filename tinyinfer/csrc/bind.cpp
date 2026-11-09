@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
-// 定义于flash_attention.cu
+// defined in: flash_attention.cu
 extern "C" void flash_attention_forward_cuda(
     const void* q,
     const void* k,
@@ -17,27 +17,6 @@ extern "C" void flash_attention_forward_cuda(
     float scale,
     bool is_causal
 );
-
-// 定义于 flash_decoding.cu
-extern "C" void flash_decoding_forward_cuda(
-    const void* q,
-    const void* k_cache,
-    const void* v_cache,
-    const int* block_table,
-    void* out,
-    float* partial_l,
-    float* partial_m,
-    float* partial_O,
-    int dtype_code,
-    int context_len,
-    int q_heads,
-    int kv_heads,
-    int head_dim,
-    int num_kvcache_block,
-    int kvcache_block_size,
-    float scale
-);
-
 
 // python端最终调用的函数
 torch::Tensor flash_attention_forward(
@@ -115,6 +94,29 @@ torch::Tensor flash_attention_forward(
 }
 
 
+
+
+
+
+// defined in: flash_decoding.cu
+extern "C" void flash_decoding_forward_cuda(
+    const void* q,
+    const void* k_cache,
+    const void* v_cache,
+    const int* block_table,
+    void* out,
+    float* partial_l,
+    float* partial_m,
+    float* partial_O,
+    int dtype_code,
+    int context_len,
+    int q_heads,
+    int kv_heads,
+    int head_dim,
+    int num_kvcache_block,
+    int kvcache_block_size,
+    float scale
+);
 
 // python 端 Paged Flash-Decoding 入口
 torch::Tensor flash_decoding_forward(
@@ -235,7 +237,193 @@ torch::Tensor flash_decoding_forward(
 
 
 
-// 进行python函数注册; 注册函数名为flash_attention_forward, 参数列表为q, k, v, query_start_pos, scale, is_causal
+// defined in: rmsnorm.cu
+extern "C" void rmsnorm_forward_cuda(
+    const void* input,
+    size_t hidden_dim,
+    size_t num_rows,
+    const void* weight,
+    float eps,
+    void* output,
+    int dtype_code
+);
+
+
+torch::Tensor rmsnorm_forward(
+    torch::Tensor input, //shape = [num_tokens, num_heads, hidden_dim] or [num_tokens, hidden_dim']
+    torch::Tensor weight,//shape = [hidden_dim]
+    float eps
+) {
+    TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
+    TORCH_CHECK(weight.is_cuda(), "weight must be a CUDA tensor");
+    TORCH_CHECK(input.device() == weight.device(), "input/weight must be on the same device");
+    TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
+    TORCH_CHECK(weight.dim() == 1, "weight must have shape [D]");
+    TORCH_CHECK(input.size(-1) == weight.size(0), "weight size must match input last dimension");
+    TORCH_CHECK(input.scalar_type() == weight.scalar_type(), "input/weight dtype mismatch");
+    TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+    TORCH_CHECK(weight.is_contiguous(), "weight must be contiguous");
+
+    int dtype_code = -1;
+    if (input.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    } else if (input.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    } else if (input.scalar_type() == at::kFloat) {
+        dtype_code = 2;
+    } else {
+        TORCH_CHECK(false, "RMSNorm supports fp16, bf16 and fp32 only");
+    }
+
+    c10::cuda::CUDAGuard device_guard(input.device());
+    auto output = torch::empty_like(input);
+    size_t hidden_dim = input.size(-1);
+    size_t num_rows = input.numel() / hidden_dim;
+    rmsnorm_forward_cuda(
+        input.data_ptr(),
+        hidden_dim,
+        num_rows,
+        weight.data_ptr(),
+        eps,
+        output.data_ptr(),
+        dtype_code
+    );
+    
+    return output;
+}
+
+
+
+
+
+
+extern "C" void rope_forward_cuda(
+    const void* q,         // [T, Hq, D]
+    const void* k,         // [T, Hk, D]
+    const int64_t* positions, // [T]
+    const float* inv_freq, // [RD/2]
+    int hidden_dim,     // D
+    int rotary_dim,     // RD
+    int num_tokens,     // T
+    int head_q,         // Hq
+    int head_k,         // Hk
+    void* q_rot,           // [T, Hq, D]
+    void* k_rot,            // [T, Hk, D]
+    int dtype_code
+);
+
+
+std::tuple<torch::Tensor, torch::Tensor> rope_forward(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor positions,
+    torch::Tensor inv_freq
+) {
+    // ---------------- Device checks ----------------
+    TORCH_CHECK(q.is_cuda(), "q must be a CUDA tensor");
+    TORCH_CHECK(k.is_cuda(), "k must be a CUDA tensor");
+    TORCH_CHECK(positions.is_cuda(), "positions must be a CUDA tensor");
+    TORCH_CHECK(inv_freq.is_cuda(), "inv_freq must be a CUDA tensor");
+
+    TORCH_CHECK(
+        q.device() == k.device() &&
+        q.device() == positions.device() &&
+        q.device() == inv_freq.device(),
+        "all tensors must be on the same device"
+    );
+
+    // ---------------- Shape checks ----------------
+    TORCH_CHECK(q.dim() == 3, "q must have shape [T, Hq, D]");
+    TORCH_CHECK(k.dim() == 3, "k must have shape [T, Hk, D]");
+    TORCH_CHECK(positions.dim() == 1, "positions must have shape [T]");
+    TORCH_CHECK(inv_freq.dim() == 1, "inv_freq must have shape [RD/2]");
+
+    TORCH_CHECK(q.size(0) == k.size(0), "q/k token count mismatch");
+    TORCH_CHECK(q.size(0) == positions.numel(), "positions length mismatch");
+    TORCH_CHECK(q.size(2) == k.size(2), "q/k head_dim mismatch");
+
+    TORCH_CHECK(q.size(1) > 0 && k.size(1) > 0, "head count must be positive");
+    TORCH_CHECK(q.size(2) > 0, "hidden_dim must be positive");
+    TORCH_CHECK(inv_freq.numel() > 0, "inv_freq must not be empty");
+
+    // ---------------- Dtype checks ----------------
+    TORCH_CHECK(q.scalar_type() == k.scalar_type(), "q/k dtype mismatch");
+    TORCH_CHECK(positions.scalar_type() == at::kLong, "positions must be int64");
+    TORCH_CHECK(inv_freq.scalar_type() == at::kFloat, "inv_freq must be float32");
+
+    int dtype_code = -1;
+
+    if (q.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    } else if (q.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    } else if (q.scalar_type() == at::kFloat) {
+        dtype_code = 2;
+    } else {
+        TORCH_CHECK(false, "RoPE supports fp16, bf16 and fp32 only");
+    }
+
+    // ---------------- Contiguous checks ----------------
+    TORCH_CHECK(q.is_contiguous(), "q must be contiguous");
+    TORCH_CHECK(k.is_contiguous(), "k must be contiguous");
+    TORCH_CHECK(positions.is_contiguous(), "positions must be contiguous");
+    TORCH_CHECK(inv_freq.is_contiguous(), "inv_freq must be contiguous");
+
+    // ---------------- Kernel parameters ----------------
+    int num_tokens = static_cast<int>(q.size(0));
+    int head_q = static_cast<int>(q.size(1));
+    int head_k = static_cast<int>(k.size(1));
+    int hidden_dim = static_cast<int>(q.size(2));
+
+    // RD = 2 * inv_freq.numel()
+    int rotary_dim = static_cast<int>(inv_freq.numel() * 2);
+
+    TORCH_CHECK(rotary_dim <= hidden_dim, "rotary_dim cannot exceed hidden_dim");
+
+    // ---------------- Device guard ----------------
+    c10::cuda::CUDAGuard device_guard(q.device());
+
+    // ---------------- Allocate outputs ----------------
+    auto q_rot = torch::empty_like(q);
+    auto k_rot = torch::empty_like(k);
+
+    // Empty input: no kernel launch
+    if (num_tokens == 0) {
+        return std::make_tuple(q_rot, k_rot);
+    }
+
+    // ---------------- Launch CUDA kernel ----------------
+    rope_forward_cuda(
+        q.data_ptr(),
+        k.data_ptr(),
+        positions.data_ptr<int64_t>(),
+        inv_freq.data_ptr<float>(),
+        hidden_dim,
+        rotary_dim,
+        num_tokens,
+        head_q,
+        head_k,
+        q_rot.data_ptr(),
+        k_rot.data_ptr(),
+        dtype_code
+    );
+
+    return std::make_tuple(q_rot, k_rot);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+// 进行python函数注册
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "flash_attention_forward",
@@ -260,6 +448,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("context_len"),
         pybind11::arg("kvcache_block_size"),
         pybind11::arg("scale")
+    );
+
+    m.def(
+        "rmsnorm_forward",
+        &rmsnorm_forward,
+        "tinyInfer RMSNorm forward",
+        pybind11::arg("input"),
+        pybind11::arg("weight"),
+        pybind11::arg("eps")
+    );
+
+    m.def(
+        "rope_forward",
+        &rope_forward,
+        "Custom RoPE CUDA",
+        pybind11::arg("q"),
+        pybind11::arg("k"),
+        pybind11::arg("positions"),
+        pybind11::arg("inv_freq")
     );
 }
 

@@ -144,7 +144,7 @@ __global__ void kernel_flash_decoding(
         dot = warp_reduce_sum_decoding(dot);
         const float score = dot * scale;
 
-        // Step 2.2: warp-local online softmax。
+        // Step 2.2: warp-local online softmax
         const float new_m = fmaxf(local_m, score);
         const float alpha = (local_l == 0.0f) ? 0.0f : myexp(local_m - new_m);
         const float beta = myexp(score - new_m);

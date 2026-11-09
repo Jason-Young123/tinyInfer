@@ -71,3 +71,27 @@ template <>
 __device__ inline float myexp<float>(float x) {
     return expf(x);
 }
+
+
+
+
+template <typename T>
+__device__ inline T warp_reduce_sum(T val) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        //val += __shfl_down_sync(0xffffffff, val, offset);
+        val += __shfl_xor_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+
+template <typename T>
+__device__ inline T warp_reduce_max(T val) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        T tmp = __shfl_down_sync(0xffffffff, val, offset);
+        val = val > tmp ? val : tmp;
+    }
+    return val;
+}

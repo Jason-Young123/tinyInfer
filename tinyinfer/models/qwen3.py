@@ -27,6 +27,7 @@ _ATTN_QK_NORM_PROFILER = TimeProfiler().register(name="qk_norm in attn", descrip
 _ATTN_ROPE_PROFILER = TimeProfiler().register(name="rope in attn", description="Profiler for rope in attention layer", cycle=35, enabled=True)
 _ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn in attn", description="Profiler for attn in attention layer", cycle=35, enabled=True)
 _ATTN_O_PROJ_PROFILER = TimeProfiler().register(name="o_proj in attn", description="Profiler for o_proj in attention layer", cycle=35, enabled=True)
+_ATTN_VIEW_PROFILER = TimeProfiler().register(name="view in attn", description="Profiler for view in attention layer", cycle=35, enabled=True)
 
 
 
@@ -104,9 +105,11 @@ class Qwen3Attention(nn.Module):
         q, k, v = self.qkv_proj.split_qkv(qkv)
         _ATTN_QKV_PROJ_PROFILER.record_end()
     
+        _ATTN_VIEW_PROFILER.record_start()
         q = q.view(-1, self.num_heads, self.head_dim) # -1代表自动推导的维度
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
+        _ATTN_VIEW_PROFILER.record_end()
 
         # Qwen3 的 q_norm/k_norm 只沿每个 head 的 head_dim 做 RMSNorm
         _ATTN_QK_NORM_PROFILER.record_start()
@@ -122,8 +125,8 @@ class Qwen3Attention(nn.Module):
         # Attention 统一处理 prefill/decode/mixed; 输出shape=[T, Hq, D]
         _ATTN_MAIN_PROFILER.record_start()
         out = self.attn(q, k, v) # 内部会根据context内容进行token拆分(为不同seq请求)
-        _ATTN_MAIN_PROFILER.record_end()
         out = out.reshape(-1, self.q_size) # shape = [T, Hq * D]
+        _ATTN_MAIN_PROFILER.record_end()
         
         _ATTN_O_PROJ_PROFILER.record_start()
         result = self.o_proj(out) # shape = [T, hidden_size]

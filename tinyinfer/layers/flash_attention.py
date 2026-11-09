@@ -1,18 +1,5 @@
-from functools import lru_cache
-
 import torch
-
-
-@lru_cache(maxsize=1)
-def _load_extension():
-    try:
-        from tinyinfer import _C
-    except ImportError as exc:
-        raise RuntimeError(
-            "tinyinfer._C is not built; run: "
-            "MAX_JOBS=4 python -m pip install -e . --no-build-isolation"
-        ) from exc
-    return _C
+from tinyinfer.utils.extension import load_extension
 
 
 #_FLASH_LOGGED = False
@@ -37,7 +24,7 @@ def flash_attention(
     k = k.contiguous()
     v = v.contiguous()
 
-    return _load_extension().flash_attention_forward( # 调用由注册flash_attention_bind.cpp注册的函数名
+    return load_extension().flash_attention_forward( # 调用由注册flash_attention_bind.cpp注册的函数名
         q,
         k,
         v,
