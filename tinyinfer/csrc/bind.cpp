@@ -474,6 +474,57 @@ torch::Tensor linear_forward_cutlass(
 
 
 
+/**************************** defined in: linear.cu ****************************/
+extern "C" int linear_forward_cublas_(
+    const void* X,
+    const void* W,
+    size_t M,
+    size_t K,
+    size_t N,
+    void* O,
+    int dtype_code
+); 
+
+torch::Tensor linear_forward_cublas(
+    torch::Tensor X,
+    torch::Tensor W
+) {
+    TORCH_CHECK(X.is_cuda() && W.is_cuda(), "X and W must be CUDA tensors");
+    TORCH_CHECK(X.dim() == 2 && W.dim() == 2, "X and W must be 2D tensors");
+    TORCH_CHECK(X.is_contiguous() && W.is_contiguous(), "X and W must be contiguous");
+    TORCH_CHECK(X.device() == W.device(), "X and W must be on the same device");
+    TORCH_CHECK(X.scalar_type() == W.scalar_type(), "X and W must have the same dtype");
+    TORCH_CHECK(X.scalar_type() == at::kHalf || X.scalar_type() == at::kBFloat16, "Only FP16 and BF16 are supported");
+
+    auto M = X.size(0);
+    auto K = X.size(1);
+    auto N = W.size(0);
+
+    TORCH_CHECK(W.size(1) == K, "K dimension mismatch");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+    auto O = torch::empty({static_cast<int64_t>(M), static_cast<int64_t>(N)}, X.options());
+
+    int dtype_code;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else {
+        dtype_code = 1;
+    }
+
+    linear_forward_cublas_(
+        X.data_ptr(),
+        W.data_ptr(),
+        M,
+        K,
+        N,
+        O.data_ptr(),
+        dtype_code
+    );
+
+    return O;
+}
 
 
 
@@ -527,6 +578,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "linear_forward_cutlass",
         &linear_forward_cutlass,
         "CUTLASS Linear Forward",
+        pybind11::arg("X"),
+        pybind11::arg("W")
+    );
+
+    m.def(
+        "linear_forward_cublas",
+        &linear_forward_cublas,
+        "Cublas Linear Forward",
         pybind11::arg("X"),
         pybind11::arg("W")
     );

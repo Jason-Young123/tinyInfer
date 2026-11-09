@@ -17,10 +17,18 @@ class LinearBase(nn.Module):
             self.register_parameter("bias", None)
     
     def forward(self, x): # y = x@W.T + b; x.shape=[.., in_features]; weight.shape=[out_features, in_features]; bias.shape=[out_features]
+        # version1: pytorch
+        result = F.linear(x, self.weight, self.bias)
+
+        # version2: cutlass
         #if not self.bias:
-        #    return load_extension().linear_forward_cutlass(x, self.weight)
+        #    result = load_extension().linear_forward_cutlass(x, self.weight)
         
-        return F.linear(x, self.weight, self.bias)
+        # version3: cublas
+        #if not self.bias:
+        #    result = load_extension().linear_forward_cublas(x, self.weight)
+        
+        return result
 
 
 # [q, k, v] = x @ [Wq, Wk, Wv] = [x @ Wq, x @ Wk, x @ Wv]

@@ -113,38 +113,29 @@ void launch_linear_cublas_typed(
 
     cublasStatus_t status = cublasGemmEx(
         handle,
-
         // Transpose
         CUBLAS_OP_T,               // A = W -> W
         CUBLAS_OP_N,               // B = X -> X.T
-
         // Dimensions
         n, m, k,
-
         // alpha
         &alpha,
-
         // A = W
         W,
         data_type,
         k,                         // lda
-
         // B = X
         X,
         data_type,
         k,                         // ldb
-
         // beta
         &beta,
-
         // C = O
         O,
         data_type,
         n,                         // ldc
-
         // Compute Type
         compute_type,
-
         // Algorithm
         CUBLAS_GEMM_DEFAULT
     );
@@ -159,7 +150,7 @@ void launch_linear_cublas_typed(
 
 
 
-extern "C" int linear_forward_cublas(
+extern "C" int linear_forward_cublas_(
     const void* X,
     const void* W,
     size_t M,
