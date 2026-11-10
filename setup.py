@@ -25,6 +25,7 @@ setup(
                 "tinyinfer/csrc/rmsnorm.cu",
                 "tinyinfer/csrc/rope.cu",
                 "tinyinfer/csrc/linear.cu",
+                "tinyinfer/csrc/mlp.cu"
             ],
 
             # CUTLASS Header-only library

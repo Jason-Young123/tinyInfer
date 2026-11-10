@@ -12,6 +12,8 @@ from tinyinfer.layers.linear import (
 )
 from tinyinfer.layers.rotary_embedding import RotaryEmbedding
 from tinyinfer.utils.profiler import TimeProfiler
+from tinyinfer.utils.extension import load_extension
+
 
 
 _EMBED_PROFILER = TimeProfiler().register(name="embedding_layer", description="Profiler for embedding layer", cycle=1, enabled=False)
@@ -27,7 +29,6 @@ _ATTN_QK_NORM_PROFILER = TimeProfiler().register(name="qk_norm in attn", descrip
 _ATTN_ROPE_PROFILER = TimeProfiler().register(name="rope in attn", description="Profiler for rope in attention layer", cycle=35, enabled=True)
 _ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn in attn", description="Profiler for attn in attention layer", cycle=35, enabled=True)
 _ATTN_O_PROJ_PROFILER = TimeProfiler().register(name="o_proj in attn", description="Profiler for o_proj in attention layer", cycle=35, enabled=True)
-_ATTN_VIEW_PROFILER = TimeProfiler().register(name="view in attn", description="Profiler for view in attention layer", cycle=35, enabled=True)
 
 
 
@@ -105,11 +106,9 @@ class Qwen3Attention(nn.Module):
         q, k, v = self.qkv_proj.split_qkv(qkv)
         _ATTN_QKV_PROJ_PROFILER.record_end()
     
-        _ATTN_VIEW_PROFILER.record_start()
         q = q.view(-1, self.num_heads, self.head_dim) # -1代表自动推导的维度
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
-        _ATTN_VIEW_PROFILER.record_end()
 
         # Qwen3 的 q_norm/k_norm 只沿每个 head 的 head_dim 做 RMSNorm
         _ATTN_QK_NORM_PROFILER.record_start()
@@ -150,11 +149,23 @@ class Qwen3MLP(nn.Module):
             bias = False
         )
 
+        self.intermediate_size = config.intermediate_size
+
     # 完整的SwiGLU, shape变化: [num_flat_tokens, hidden_size] -> [num_flat_tokens, hidden_size]
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.gate_up_proj(x)
-        x = self.act(x)
-        return self.down_proj(x)
+        # version1: torch
+        # x = self.gate_up_proj(x)    # [N, hidden_dim] -> [N, 2 * intermediate]        
+        # x = self.act(x)             # [N, 2 * intermediate] -> act([N, intermediate]) * [N, intermediate] -> [N, intermediate]        
+        # result = self.down_proj(x) # [N, intermediate] -> [N, hidden_dim]
+        
+        # version2: self-implemented
+        I = self.intermediate_size
+        #gate_up = self.gate_up_proj.weight
+        #gate = gate_up[:I, :]
+        #up = gate_up[I:, :]
+        result = load_extension().mlp_forward(x, self.gate_up_proj.weight[:I, :], self.gate_up_proj.weight[I:, :], self.down_proj.weight)
+        
+        return result
 
 
 class Qwen3DecoderLayer(nn.Module):

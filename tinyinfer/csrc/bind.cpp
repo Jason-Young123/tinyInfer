@@ -528,6 +528,116 @@ torch::Tensor linear_forward_cublas(
 
 
 
+
+/**************************** defined in: mlp.cu ****************************/
+extern "C" void mlp_forward_cuda(
+    const void* X,     // [N, hidden_dim]
+    const void* gate,  // [intermediate, hidden_dim]
+    const void* up,    // [intermediate, hidden_dim]
+    const void* down,  // [hidden_dim, intermediate]
+    size_t N,
+    size_t hidden_dim,
+    size_t intermediate,
+    void* tmp,         // [N, intermediate]
+    void* O,           // [N, hidden_dim]
+    int dtype_code
+);
+
+torch::Tensor mlp_forward(//此处不再需要tmp作为输入
+    torch::Tensor X,       // [N, hidden_dim]
+    torch::Tensor gate,    // [intermediate, hidden_dim]
+    torch::Tensor up,      // [intermediate, hidden_dim]
+    torch::Tensor down    // [hidden_dim, intermediate]
+) {
+    // ---------------- CUDA checks ----------------
+    TORCH_CHECK(X.is_cuda(), "X must be a CUDA tensor");
+    TORCH_CHECK(gate.is_cuda(), "gate must be a CUDA tensor");
+    TORCH_CHECK(up.is_cuda(), "up must be a CUDA tensor");
+    TORCH_CHECK(down.is_cuda(), "down must be a CUDA tensor");
+
+    // ---------------- Device checks ----------------
+    TORCH_CHECK(X.device() == gate.device(), "X/gate device mismatch");
+    TORCH_CHECK(X.device() == up.device(), "X/up device mismatch");
+    TORCH_CHECK(X.device() == down.device(), "X/down device mismatch");
+
+    // ---------------- Shape checks ----------------
+    TORCH_CHECK(X.dim() == 2, "X must be [N, hidden_dim]");
+    TORCH_CHECK(gate.dim() == 2, "gate must be 2D");
+    TORCH_CHECK(up.dim() == 2, "up must be 2D");
+    TORCH_CHECK(down.dim() == 2, "down must be 2D");
+
+    const int64_t N = X.size(0);
+    const int64_t hidden_dim = X.size(1);
+    const int64_t intermediate = gate.size(0);
+
+    TORCH_CHECK(N > 0, "N must be positive");
+    TORCH_CHECK(hidden_dim > 0, "hidden_dim must be positive");
+    TORCH_CHECK(intermediate > 0, "intermediate must be positive");
+
+    TORCH_CHECK(gate.size(1) == hidden_dim, "gate shape mismatch");
+    TORCH_CHECK(up.size(0) == intermediate && up.size(1) == hidden_dim, "up shape mismatch");
+
+    TORCH_CHECK(down.size(0) == hidden_dim && down.size(1) == intermediate, "down shape mismatch");
+
+    // ---------------- Batch size warning ----------------
+    if (N > 32) {
+        TORCH_WARN_ONCE("MLP: N = ", N, " is relatively large, which may result in poor performance.");
+    }
+    TORCH_CHECK(N <= 65535, "N exceeds the supported gridDim.y limit (65535)");
+
+    // ---------------- Dtype checks ----------------
+    TORCH_CHECK(
+        X.scalar_type() == gate.scalar_type() &&
+        X.scalar_type() == up.scalar_type() &&
+        X.scalar_type() == down.scalar_type(),
+        "All tensors must have the same dtype"
+    );
+
+    int dtype_code = -1;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else if (X.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    }
+    else if (X.scalar_type() == at::kFloat) {
+        dtype_code = 2;
+    }
+    else {
+        TORCH_CHECK(false, "MLP only supports FP16, BF16 and FP32");
+    }
+
+    // ---------------- Contiguous checks ----------------
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    TORCH_CHECK(gate.is_contiguous(), "gate must be contiguous");
+    TORCH_CHECK(up.is_contiguous(), "up must be contiguous");
+    TORCH_CHECK(down.is_contiguous(), "down must be contiguous");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+    auto O = torch::empty({N, hidden_dim}, X.options());
+    auto tmp = torch::empty({N, intermediate}, X.options());// 临时 Buffer：由 PyTorch Caching Allocator 管理
+
+    mlp_forward_cuda(
+        X.data_ptr(),
+        gate.data_ptr(),
+        up.data_ptr(),
+        down.data_ptr(),
+        static_cast<size_t>(N),
+        static_cast<size_t>(hidden_dim),
+        static_cast<size_t>(intermediate),
+        tmp.data_ptr(),
+        O.data_ptr(),
+        dtype_code
+    );
+    return O;
+}
+
+
+
+
+
+
+
 // 进行python函数注册
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
@@ -588,6 +698,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Cublas Linear Forward",
         pybind11::arg("X"),
         pybind11::arg("W")
+    );
+
+    m.def(
+        "mlp_forward",
+        &mlp_forward,
+        "MLP Forward",
+        pybind11::arg("X"),
+        pybind11::arg("gate"),
+        pybind11::arg("up"),
+        pybind11::arg("down")
     );
 }
 

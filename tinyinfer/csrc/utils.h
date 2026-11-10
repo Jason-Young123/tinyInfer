@@ -73,6 +73,10 @@ __device__ inline float myexp<float>(float x) {
 }
 
 
+__device__ __forceinline__ float silu_f(float x) {
+    return x / (1.0f + expf(-x));
+}
+
 
 
 template <typename T>
