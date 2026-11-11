@@ -27,7 +27,7 @@ _LAYERNORM2_PROFILER = TimeProfiler().register(name="layer_norm2", description="
 _ATTN_QKV_PROJ_PROFILER = TimeProfiler().register(name="qkv_proj in attn", description="Profiler for qkv_proj in attention layer", cycle=35, enabled=True)
 _ATTN_QK_NORM_PROFILER = TimeProfiler().register(name="qk_norm in attn", description="Profiler for qk_norm in attention layer", cycle=35, enabled=True)
 _ATTN_ROPE_PROFILER = TimeProfiler().register(name="rope in attn", description="Profiler for rope in attention layer", cycle=35, enabled=True)
-_ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn in attn", description="Profiler for attn in attention layer", cycle=35, enabled=True)
+_ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn_main in attn", description="Profiler for attn_main in attention layer", cycle=35, enabled=True)
 _ATTN_O_PROJ_PROFILER = TimeProfiler().register(name="o_proj in attn", description="Profiler for o_proj in attention layer", cycle=35, enabled=True)
 
 
@@ -160,9 +160,6 @@ class Qwen3MLP(nn.Module):
         
         # version2: self-implemented
         I = self.intermediate_size
-        #gate_up = self.gate_up_proj.weight
-        #gate = gate_up[:I, :]
-        #up = gate_up[I:, :]
         result = load_extension().mlp_forward(x, self.gate_up_proj.weight[:I, :], self.gate_up_proj.weight[I:, :], self.down_proj.weight)
         
         return result

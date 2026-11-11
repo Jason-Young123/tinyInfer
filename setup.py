@@ -36,12 +36,12 @@ setup(
             extra_compile_args={
                 "cxx": [
                     "-O3",
-                    "-std=c++17",
+                    "-std=c++20",
                 ],
 
                 "nvcc": [
                     "-O3",
-                    "-std=c++17",
+                    "-std=c++20",
                     "-lineinfo",
                 ],
             },

@@ -13,12 +13,13 @@ from tinyinfer.utils.profiler import TimeProfiler
 # Shared profiler for store_kv across all Attention layers
 # 注意这里收到TimeProfiler.PROFILER的控制, 如果为False实际上会跳过注册逻辑, 但本身调用register()不会出错
 _STORE_KV_PROFILER = TimeProfiler().register(name="store_kv", description="Write current K/V into paged KV cache", cycle=35, enabled=True)
-_FLASH_ATTN_PROFILER = TimeProfiler().register(name="flash_attention", description="uniform flash attention/decoding", cycle=35, enabled=True)
 
 _FA_PROFILER = TimeProfiler().register(name="flash attention", description="Flash attention only", cycle=35, enabled=True)
-_KV_GATHER_PROFILER = TimeProfiler().register(name="kv gather", description="Gather KV cache", cycle=35, enabled=True)
+_KV_GATHER_PROFILER = TimeProfiler().register(name="kv gather", description="Gather KV cache", cycle=35, enabled=False)
 _FD_PROFILER = TimeProfiler().register(name="flash decoding", description="Flash decoding only", cycle=35, enabled=True)
 
+_FLASHINFER_FA_PROFILER = TimeProfiler().register(name="flashinfer attention", description="FlashInfer attention only", cycle=35, enabled=True)
+_FLASHINFER_FD_PROFILER = TimeProfiler().register(name="flashinfer decoding", description="FlashInfer decoding only", cycle=35, enabled=True)
 
 
 
@@ -158,10 +159,6 @@ forward
 
 
 
-
-_FLASH_LOGGED = False
-_TORCH_LOGGED = False
-
 class Attention(nn.Module):
     def __init__(
         self,
@@ -186,7 +183,7 @@ class Attention(nn.Module):
         self.block_size = block_size
 
         # 增加attention backend选择(torch or flashattention); runtime backend，不污染模型 config。
-        if backend not in {"torch", "flash"}:
+        if backend not in {"torch", "flash", "flashinfer"}:
             raise ValueError("attention backend must be 'torch' or 'flash'")
         self.backend = backend
 
@@ -220,11 +217,6 @@ class Attention(nn.Module):
         # q_i:    [Tq, Hq, D] = [q_len, num_q_heads, hidden_dim]
         # cache_k: [num_blocks, block_size, num_kv_heads, hidden_dim]
         # cache_v: [num_blocks, block_size, num_kv_heads, hidden_dim]
-
-        global _TORCH_LOGGED
-        if not _TORCH_LOGGED: # 打印backend
-            print("[tinyInfer] Attention backend: torch.scaled_dot_product_attention")
-            _TORCH_LOGGED = True
 
         # 在torch backend内部materialize当前sequence对应的连续历史K/V
         k_hist = gather_sequence_kv(
@@ -274,44 +266,8 @@ class Attention(nn.Module):
 
 
 
-    # backend = flash条件下 q_len > 1专用
-    def _flash_attend_prefill(self, q_i, k_hist, v_hist, query_start_pos: int):
-        # q_i:    [Tq, Hq, D]
-        # k_hist: [Tk, Hkv, D]
-        return flash_attention(
-            q_i,
-            k_hist,
-            v_hist,
-            query_start_pos=query_start_pos,
-            scale=self.scale,
-            is_causal=True,
-        )
 
-
-
-    # backend = flash条件下 q_len=1专用，不materialize历史连续K/V
-    def _flash_attend_decode_one(
-        self,
-        q_i: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-        block_table: torch.Tensor,
-        context_len: int,
-    ) -> torch.Tensor:
-        if q_i.shape[0] != 1:
-            raise ValueError("_attend_decode_one requires q_len == 1")
-        return flash_decoding(
-            q=q_i,
-            k_cache=cache_k,
-            v_cache=cache_v,
-            block_table=block_table,
-            context_len=context_len,
-            kvcache_block_size=self.block_size,
-            scale=self.scale,
-        )
-
-
-    # backend = flash统一入口:
+    # backend = flash 统一入口:
     # q_len > 1 -> FlashAttention
     # q_len = 1 -> Paged Flash-Decoding
     def _flash_attend_uniform(
@@ -323,18 +279,13 @@ class Attention(nn.Module):
         context_len: int,
         query_start_pos: int,
     ) -> torch.Tensor:
-        global _FLASH_LOGGED
-        if not _FLASH_LOGGED: # 打印backend
-            print("[tinyInfer] Attention backend: self implemented flash attention/decoding")
-            _FLASH_LOGGED = True
-
         # q_i: [Tq, Hq, D]
         q_len = q_i.shape[0]
 
         # decode: q_len = 1，直接读取paged KV cache，不materialize连续K/V
         if q_len == 1:
             _FD_PROFILER.record_start()
-            result =  flash_decoding(
+            result = flash_decoding(
                 q=q_i,
                 k_cache=cache_k,
                 v_cache=cache_v,
@@ -379,6 +330,123 @@ class Attention(nn.Module):
 
 
 
+    # backend = flashinfer 统一入口:
+    def _flashinfer_attend_uniform_deprecated(
+        self,
+        q_i: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        block_table: torch.Tensor,
+        context_len: int,
+        query_start_pos: int,
+    ) -> torch.Tensor:
+        import flashinfer
+
+        q_len = q_i.shape[0]
+        _KV_GATHER_PROFILER.record_start()
+        k_hist = gather_sequence_kv(cache_k, block_table, context_len, self.block_size)
+        v_hist = gather_sequence_kv(cache_v, block_table, context_len, self.block_size)
+        _KV_GATHER_PROFILER.record_end()
+
+        _FLASHINFER_PROFILER.record_start()
+        if q_len == 1:
+            out = flashinfer.single_decode_with_kv_cache(# Decode: [1, Hq, D] -> [Hq, D]
+                q=q_i.squeeze(0),
+                k=k_hist,
+                v=v_hist,
+                kv_layout="NHD",
+                use_tensor_cores=True,
+                sm_scale=self.scale,
+            )
+            out = out.unsqueeze(0) # [Hq, D] -> [1, Hq, D]
+        else:
+            out = flashinfer.single_prefill_with_kv_cache( # Prefill: [Tq, Hq, D]
+                q=q_i,
+                k=k_hist,
+                v=v_hist,
+                kv_layout="NHD",
+                causal=True,
+                sm_scale=self.scale,
+                backend="auto",
+            )
+        _FLASHINFER_PROFILER.record_end()
+
+        return out
+
+
+
+    def _flashinfer_attend_uniform(
+        self,
+        q_i: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        block_table: torch.Tensor,
+        context_len: int,
+        query_start_pos: int,
+    ) -> torch.Tensor:
+        import flashinfer
+
+        q_len, num_qo_heads, head_dim = q_i.shape
+        num_kv_heads = cache_k.shape[2]
+        page_size = self.block_size
+        num_pages = (context_len + page_size - 1) // page_size
+
+        block_indices = block_table[:num_pages].to(device=q_i.device, dtype=torch.int32).contiguous()
+
+        if not hasattr(self.kv_cache, "_flashinfer_workspace"):
+            self.kv_cache._flashinfer_workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=q_i.device)
+
+        workspace = self.kv_cache._flashinfer_workspace
+
+        if q_len == 1:
+            # Paged Decode
+            _FLASHINFER_FD_PROFILER.record_start()
+            out = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+                query=q_i,
+                kv_cache=(cache_k, cache_v),
+                workspace_buffer=workspace,
+                block_tables=block_indices.unsqueeze(0),
+                seq_lens=torch.tensor([context_len], dtype=torch.uint32, device=q_i.device),
+                max_seq_len=context_len,
+                bmm1_scale=self.scale,
+                kv_layout="NHD",
+                backend="auto",
+            )
+            _FLASHINFER_FD_PROFILER.record_end()
+        else:
+            # Paged Prefill
+            if not hasattr(self.kv_cache, "_flashinfer_prefill_wrapper"):
+                self.kv_cache._flashinfer_prefill_wrapper = (
+                    flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="NHD")
+                )
+
+            wrapper = self.kv_cache._flashinfer_prefill_wrapper
+
+            wrapper.plan(
+                qo_indptr=torch.tensor([0, q_len], dtype=torch.int32, device=q_i.device),
+                paged_kv_indptr=torch.tensor([0, num_pages], dtype=torch.int32, device=q_i.device),
+                paged_kv_indices=block_indices,
+                paged_kv_last_page_len=torch.tensor([(context_len - 1) % page_size + 1], dtype=torch.int32, device=q_i.device),
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim_qk=head_dim,
+                page_size=page_size,
+                causal=True,
+                sm_scale=self.scale,
+                q_data_type=q_i.dtype,
+                kv_data_type=cache_k.dtype,
+            )
+
+            _FLASHINFER_FA_PROFILER.record_start()
+            out = wrapper.run(q_i, (cache_k, cache_v))
+            _FLASHINFER_FA_PROFILER.record_end()
+
+        return out
+
+
+
+
+
     # interface
     def forward(self, q, k, v): # q/k/v shape: [num_tokens, num_heads/num_kv_heads, head_dim], 这里代表刚刚乘过Wq/k/v的向量
         ctx = get_context()
@@ -412,7 +480,6 @@ class Attention(nn.Module):
             # q_len > 1 -> gather连续K/V后进入FlashAttention
             # q_len = 1 -> 直接进入Paged Flash-Decoding, 不materialize连续K/V
             if self.backend == "flash":
-                _FLASH_ATTN_PROFILER.record_start()
                 out_i = self._flash_attend_uniform(
                     q_i=q_i,
                     cache_k=cache_k,
@@ -421,7 +488,7 @@ class Attention(nn.Module):
                     context_len=context_len,
                     query_start_pos=query_start,
                 )
-                _FLASH_ATTN_PROFILER.record_end()
+            
             # torch backend:
             # 始终在backend内部gather连续K/V后进入SDPA
             elif self.backend == "torch":
@@ -433,6 +500,18 @@ class Attention(nn.Module):
                     context_len=context_len,
                     query_start_pos=query_start,
                 )
+            
+            # flashinfer backend
+            elif self.backend == "flashinfer":
+                out_i = self._flashinfer_attend_uniform(
+                    q_i=q_i,
+                    cache_k=cache_k,
+                    cache_v=cache_v,
+                    block_table=ctx.block_tables[i],
+                    context_len=context_len,
+                    query_start_pos=query_start,
+                )
+
             else:
                 raise ValueError(f"unsupported attention backend: {self.backend}")
 

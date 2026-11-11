@@ -19,7 +19,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run tinyInfer SD UI.")
     parser.add_argument("--speculative", action="store_true", help="Enable speculative decoding.")
     parser.add_argument("--model", default=str(DEFAULT_TARGET_MODEL), help="Target model path.")
-    parser.add_argument("--attention-backend", type=str, choices=["torch", "flash"], default="torch", help="Attention backend: torch or flash")
+    parser.add_argument("--attention-backend", type=str, choices=["torch", "flash", "flashinfer"], default="torch", help="Attention backend: torch or flash")
     parser.add_argument("--draft-model", default=str(DEFAULT_DRAFT_MODEL), help="Draft model path.")
     parser.add_argument("--max-draft-tokens", type=int, default=5, help="Global K, valid range: 1..32.")
     parser.add_argument("--max-num-batched-tokens", type=int, default=512)
