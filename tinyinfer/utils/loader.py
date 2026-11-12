@@ -54,10 +54,6 @@ def load_weights(model, model_path: str | Path, strict: bool = True) -> LoadRepo
         "k_proj.weight": "k",
         "v_proj.weight": "v",
     }
-    packed_mlp_suffix = {
-        "gate_proj.weight": "gate",
-        "up_proj.weight": "up",
-    }
 
     for ckpt_name, tensor in iter_safetensor_weights(model_path):
         # 1. packed QKV
@@ -101,34 +97,7 @@ def load_weights(model, model_path: str | Path, strict: bool = True) -> LoadRepo
         if matched:
             continue
 
-        # 2. packed Gate/Up
-        for suffix, shard in packed_mlp_suffix.items():
-            if ckpt_name.endswith("mlp." + suffix):
-                prefix = ckpt_name[: -len(suffix)]
-                target = prefix + "gate_up_proj.weight"
-                if target not in params:
-                    report.unexpected.append(ckpt_name)
-                    matched = True
-                    break
-
-                param = params[target]
-                module_path = target.rsplit(".weight", 1)[0]
-                module = model.get_submodule(module_path)
-                size = module.intermediate_size
-
-                begin, end = (0, size) if shard == "gate" else (size, 2 * size)
-                view = param.data[begin:end]
-                if tuple(view.shape) != tuple(tensor.shape):
-                    raise RuntimeError(
-                        f"packed Gate/Up shape mismatch for {ckpt_name}: "
-                        f"target slice={tuple(view.shape)} checkpoint={tuple(tensor.shape)}"
-                    )
-                view.copy_(tensor.to(device=param.device, dtype=param.dtype))
-                report.packed.append(f"{target}:{shard}")
-                matched = True
-                break
-        if matched:
-            continue
+        # 2. packed Gate/Up, moved to normal load
 
         # 3. tied lm_head：checkpoint 有 lm_head，但模型侧因为 tying 没有独立参数
         if ckpt_name == "lm_head.weight" and ckpt_name not in params:
@@ -150,7 +119,7 @@ def load_weights(model, model_path: str | Path, strict: bool = True) -> LoadRepo
         packed_shards.setdefault(target, set()).add(shard)
 
     for target, shards in packed_shards.items():
-        required = {"q", "k", "v"} if target.endswith("qkv_proj.weight") else {"gate", "up"}
+        required = {"q", "k", "v"}
         if shards == required:
             loaded_params.add(target)
             report.loaded.append(target)

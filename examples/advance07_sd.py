@@ -17,9 +17,10 @@ DEFAULT_DRAFT_MODEL = DEFAULT_MODEL_DIR / "Qwen3-0.6B"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run tinyInfer SD UI.")
-    parser.add_argument("--speculative", action="store_true", help="Enable speculative decoding.")
-    parser.add_argument("--model", default=str(DEFAULT_TARGET_MODEL), help="Target model path.")
     parser.add_argument("--attention-backend", type=str, choices=["torch", "flash", "flashinfer"], default="torch", help="Attention backend: torch or flash")
+    parser.add_argument("--quantization", type=str, choices=["mxfp4"], default=None, help="Quantization type for MLP layer (default: None)")
+    parser.add_argument("--model", default=str(DEFAULT_TARGET_MODEL), help="Target model path.")
+    parser.add_argument("--speculative", action="store_true", help="Enable speculative decoding.")
     parser.add_argument("--draft-model", default=str(DEFAULT_DRAFT_MODEL), help="Draft model path.")
     parser.add_argument("--max-draft-tokens", type=int, default=5, help="Global K, valid range: 1..32.")
     parser.add_argument("--max-num-batched-tokens", type=int, default=512)
@@ -41,6 +42,7 @@ def main():
 
     config = Config(
         model=args.model,
+        quantization=args.quantization,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,

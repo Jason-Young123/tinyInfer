@@ -21,6 +21,9 @@ class Config:
     max_draft_tokens: int = 5               # max draft token length
     adaptive_draft: bool = False            # 是否自适应调整draft token length
 
+    # Quantization
+    quantization: str | None = None         # 目前实现weight-only的MXFP4量化
+
     hf_config: Any | None = None            # target model超参数, 包括num_hidden_layers、num_key_value_heads、head_dim等
     draft_hf_config: Any | None = None      # draft model超参数
     eos_token_id: int = -1

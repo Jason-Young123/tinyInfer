@@ -7,7 +7,7 @@ from tinyinfer.layers.embed_head import LMHead, VocabEmbedding
 from tinyinfer.layers.layernorm import RMSNorm
 from tinyinfer.layers.linear import (
     LinearBase,
-    MergedGateUpLinear,
+    LinearMXFP4,
     QKVParallelLinear,
 )
 from tinyinfer.layers.rotary_embedding import RotaryEmbedding
@@ -135,21 +135,19 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3MLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, quantization = None):
         super().__init__()
-        self.gate_up_proj = MergedGateUpLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            bias = False
-        )
-        self.act = SiluAndMul()
-        self.down_proj = LinearBase(
-            config.intermediate_size,
-            config.hidden_size,
-            bias = False
-        )
+        self.quantization = quantization
+        # self.act = SiluAndMul()
 
-        self.intermediate_size = config.intermediate_size
+        if quantization == "mxfp4":
+            Linear = LinearMXFP4
+        else: # 默认非量化
+            Linear = LinearBase
+        self.gate_proj = Linear(config.hidden_size, config.intermediate_size, bias = False)
+        self.up_proj = Linear(config.hidden_size, config.intermediate_size, bias = False)
+        self.down_proj = Linear(config.intermediate_size, config.hidden_size, bias = False) 
+
 
     # 完整的SwiGLU, shape变化: [num_flat_tokens, hidden_size] -> [num_flat_tokens, hidden_size]
     def forward(self, x:torch.Tensor) -> torch.Tensor:
@@ -159,19 +157,32 @@ class Qwen3MLP(nn.Module):
         # result = self.down_proj(x) # [N, intermediate] -> [N, hidden_dim]
         
         # version2: self-implemented
-        I = self.intermediate_size
-        result = load_extension().mlp_forward(x, self.gate_up_proj.weight[:I, :], self.gate_up_proj.weight[I:, :], self.down_proj.weight)
-        
+        if self.quantization == "mxfp4":
+            raise NotImplementedError("MXFP4 MLP kernel is not implemented yet")
+            #result = load_extension().mlp_forward_mxfp4(
+            #    x, 
+            #    self.gate_proj.weight_packed, self.gate_proj.weight_scale, 
+            #    self.up_proj.weight_packed, self.up_proj.weight_scale, 
+            #    self.down_proj.weight_packed, self.down_proj.weight_scale
+            #)
+        else:
+            result = load_extension().mlp_forward(
+                x, 
+                self.gate_proj.weight, 
+                self.up_proj.weight, 
+                self.down_proj.weight
+            )
+     
         return result
 
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx:int, kv_cache = None, backend = "torch"):
+    def __init__(self, config, layer_idx:int, kv_cache = None, backend = "torch", quantization = None):
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps = config.rms_norm_eps)
         self.self_attn = Qwen3Attention(config, layer_idx, kv_cache, backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps = config.rms_norm_eps)
-        self.mlp = Qwen3MLP(config)
+        self.mlp = Qwen3MLP(config, quantization)
 
     def set_kv_cache(self, kv_cache) -> None:
         self.self_attn.set_kv_cache(kv_cache)
@@ -211,11 +222,11 @@ class Qwen3DecoderLayer(nn.Module):
 
 # 完整模型Backbone, embedding layer + multi-layer transformer, 但不包含最后的LM Head
 class Qwen3Model(nn.Module):
-    def __init__(self, config, kv_cache=None, backend = "torch"):
+    def __init__(self, config, kv_cache=None, backend = "torch", quantization = None):
         super().__init__()
         self.embed_tokens = VocabEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config, i, kv_cache, backend) for i in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config, i, kv_cache, backend, quantization) for i in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -249,10 +260,10 @@ class Qwen3Model(nn.Module):
 
 # Backbone + 最后的LM Head
 class Qwen3ForCausalLM(nn.Module):
-    def __init__(self, config, kv_cache=None, backend = "torch"):
+    def __init__(self, config, kv_cache=None, backend = "torch", quantization = None):
         super().__init__()
         self.config = config
-        self.model = Qwen3Model(config, kv_cache, backend)
+        self.model = Qwen3Model(config, kv_cache, backend, quantization)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         
         # 若 checkpoint 使用 tied embeddings(即weight tying, 权重绑定), 让两个 module 共享同一个 Parameter

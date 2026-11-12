@@ -31,6 +31,29 @@ class LinearBase(nn.Module):
         return result
 
 
+
+
+class LinearMXFP4(nn.Module):
+    def __init__(self, in_features:int, out_features:int, bias:bool=False, dtype=None, device=None):
+        super().__init__()
+        self.in_features = in_features   # 输入shape的最后一维大小
+        self.out_features = out_features # 输出shape的最后一维大小
+        assert in_features % 32 == 0
+        # 注意量化之后weight_packed和weight_scale的存储类型都是uint8
+        self.weight_packed = nn.Parameter(torch.empty(out_features, in_features//2, dtype=torch.uint8, device=device), requires_grad=False)
+        self.weight_scale = nn.Parameter(torch.empty(out_features, in_features // 32, dtype=torch.uint8, device = device), requires_grad=False)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
+        else:
+            self.register_parameter("bias", None)
+    
+    #def forward(self, x): # y = x@W.T + b; x.shape=[.., in_features]; weight.shape=[out_features, in_features]; bias.shape=[out_features]
+    #    result = F.linear(x, self.weight, self.bias)
+    #    return result
+
+
+
+
 # [q, k, v] = x @ [Wq, Wk, Wv] = [x @ Wq, x @ Wk, x @ Wv]
 class QKVParallelLinear(LinearBase):
     def __init__(self, hidden_size, num_heads, num_kv_heads, head_dim, bias=False, dtype=None, device=None):
