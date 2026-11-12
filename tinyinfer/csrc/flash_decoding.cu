@@ -3,20 +3,6 @@
 // Flash-Decoding 固定一个 CTA = 4 warps = 128 threads。
 constexpr int FLASH_DECODING_NUM_WARPS = 4;
 constexpr int FLASH_DECODING_THREADS = 128;
-constexpr unsigned FLASH_DECODING_MASK = 0xffffffffu;
-
-
-
-// 一个 warp 协作完成一个 token 的 q·k。
-__device__ __forceinline__ float warp_reduce_sum_decoding(float val) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val += __shfl_down_sync(FLASH_DECODING_MASK, val, offset);
-    }
-    return __shfl_sync(FLASH_DECODING_MASK, val, 0);
-}
-
-
 
 
 
@@ -141,7 +127,7 @@ __global__ void kernel_flash_decoding(
             const float k_val = to_float<T>(KCache[kv_base + static_cast<size_t>(d)]);
             dot += q_val * k_val;
         }
-        dot = warp_reduce_sum_decoding(dot);
+        dot = warp_reduce_sum(dot);
         const float score = dot * scale;
 
         // Step 2.2: warp-local online softmax
