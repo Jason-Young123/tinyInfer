@@ -158,13 +158,13 @@ class Qwen3MLP(nn.Module):
         
         # version2: self-implemented
         if self.quantization == "mxfp4":
-            raise NotImplementedError("MXFP4 MLP kernel is not implemented yet")
-            #result = load_extension().mlp_forward_mxfp4(
-            #    x, 
-            #    self.gate_proj.weight_packed, self.gate_proj.weight_scale, 
-            #    self.up_proj.weight_packed, self.up_proj.weight_scale, 
-            #    self.down_proj.weight_packed, self.down_proj.weight_scale
-            #)
+            # raise NotImplementedError("MXFP4 MLP kernel is not implemented yet")
+            result = load_extension().mlp_forward_mxfp4(
+               x, 
+               self.gate_proj.weight_packed, self.gate_proj.weight_scale, 
+               self.up_proj.weight_packed, self.up_proj.weight_scale, 
+               self.down_proj.weight_packed, self.down_proj.weight_scale
+            )
         else:
             result = load_extension().mlp_forward(
                 x, 

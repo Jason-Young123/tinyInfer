@@ -636,6 +636,164 @@ torch::Tensor mlp_forward(//此处不再需要tmp作为输入
 
 
 
+/**************************** defined in: mlp_fp4.cu ****************************/
+extern "C" void mlp_forward_mxfp4_cuda(
+    const void* X,               // [N, hidden_dim]
+    const void* gate,            // [intermediate, hidden_dim / 2]
+    const void* gate_scale,      // [intermediate, hidden_dim / 32]
+    const void* up,              // [intermediate, hidden_dim / 2]
+    const void* up_scale,        // [intermediate, hidden_dim / 32]
+    const void* down,            // [hidden_dim, intermediate / 2]
+    const void* down_scale,      // [hidden_dim, intermediate / 32]
+    size_t N,
+    size_t hidden_dim,
+    size_t intermediate,
+    void* tmp,                   // [N, intermediate]
+    void* O,                     // [N, hidden_dim]
+    int dtype_code
+);
+
+torch::Tensor mlp_forward_mxfp4(
+    torch::Tensor X,             // [N, hidden_dim]
+    torch::Tensor gate,          // [intermediate, hidden_dim / 2]
+    torch::Tensor gate_scale,    // [intermediate, hidden_dim / 32]
+    torch::Tensor up,            // [intermediate, hidden_dim / 2]
+    torch::Tensor up_scale,      // [intermediate, hidden_dim / 32]
+    torch::Tensor down,          // [hidden_dim, intermediate / 2]
+    torch::Tensor down_scale     // [hidden_dim, intermediate / 32]
+) {
+    // ---------------- CUDA checks ----------------
+    TORCH_CHECK(X.is_cuda(), "X must be a CUDA tensor");
+    TORCH_CHECK(gate.is_cuda(), "gate must be a CUDA tensor");
+    TORCH_CHECK(gate_scale.is_cuda(), "gate_scale must be a CUDA tensor");
+    TORCH_CHECK(up.is_cuda(), "up must be a CUDA tensor");
+    TORCH_CHECK(up_scale.is_cuda(), "up_scale must be a CUDA tensor");
+    TORCH_CHECK(down.is_cuda(), "down must be a CUDA tensor");
+    TORCH_CHECK(down_scale.is_cuda(), "down_scale must be a CUDA tensor");
+
+    // ---------------- Device checks ----------------
+    TORCH_CHECK(X.device() == gate.device(), "X/gate device mismatch");
+    TORCH_CHECK(X.device() == gate_scale.device(), "X/gate_scale device mismatch");
+    TORCH_CHECK(X.device() == up.device(), "X/up device mismatch");
+    TORCH_CHECK(X.device() == up_scale.device(), "X/up_scale device mismatch");
+    TORCH_CHECK(X.device() == down.device(), "X/down device mismatch");
+    TORCH_CHECK(X.device() == down_scale.device(), "X/down_scale device mismatch");
+
+    // ---------------- Shape checks ----------------
+    TORCH_CHECK(X.dim() == 2, "X must be [N, hidden_dim]");
+    TORCH_CHECK(gate.dim() == 2, "gate must be 2D");
+    TORCH_CHECK(gate_scale.dim() == 2, "gate_scale must be 2D");
+    TORCH_CHECK(up.dim() == 2, "up must be 2D");
+    TORCH_CHECK(up_scale.dim() == 2, "up_scale must be 2D");
+    TORCH_CHECK(down.dim() == 2, "down must be 2D");
+    TORCH_CHECK(down_scale.dim() == 2, "down_scale must be 2D");
+
+    const int64_t N = X.size(0);
+    const int64_t hidden_dim = X.size(1);
+    const int64_t intermediate = gate.size(0);
+
+    TORCH_CHECK(N > 0, "N must be positive");
+    TORCH_CHECK(hidden_dim > 0, "hidden_dim must be positive");
+    TORCH_CHECK(intermediate > 0, "intermediate must be positive");
+
+    // ---------------- MXFP4 alignment checks ----------------
+    TORCH_CHECK(hidden_dim % 32 == 0, "hidden_dim must be divisible by 32");
+    TORCH_CHECK(intermediate % 32 == 0, "intermediate must be divisible by 32");
+
+    // ---------------- Packed weight shape checks ----------------
+    TORCH_CHECK(
+        gate.size(1) == hidden_dim / 2,
+        "gate shape mismatch"
+    );
+    TORCH_CHECK(
+        up.size(0) == intermediate && up.size(1) == hidden_dim / 2,
+        "up shape mismatch"
+    );
+    TORCH_CHECK(
+        down.size(0) == hidden_dim && down.size(1) == intermediate / 2,
+        "down shape mismatch"
+    );
+
+    // ---------------- MXFP4 scale shape checks ----------------
+    TORCH_CHECK(
+        gate_scale.size(0) == intermediate &&
+        gate_scale.size(1) == hidden_dim / 32,
+        "gate_scale shape mismatch"
+    );
+    TORCH_CHECK(
+        up_scale.size(0) == intermediate &&
+        up_scale.size(1) == hidden_dim / 32,
+        "up_scale shape mismatch"
+    );
+    TORCH_CHECK(
+        down_scale.size(0) == hidden_dim &&
+        down_scale.size(1) == intermediate / 32,
+        "down_scale shape mismatch"
+    );
+
+    // ---------------- Batch size warning ----------------
+    if (N > 32) {
+        TORCH_WARN_ONCE("MXFP4 MLP: N = ", N, " is relatively large, which may result in poor performance.");
+    }
+    TORCH_CHECK(N <= 65535, "N exceeds the supported gridDim.y limit (65535)");
+
+    // ---------------- Dtype checks ----------------
+    TORCH_CHECK(
+        gate.scalar_type() == at::kByte &&
+        gate_scale.scalar_type() == at::kByte &&
+        up.scalar_type() == at::kByte &&
+        up_scale.scalar_type() == at::kByte &&
+        down.scalar_type() == at::kByte &&
+        down_scale.scalar_type() == at::kByte,
+        "MXFP4 weights and scales must be uint8"
+    );
+
+    int dtype_code = -1;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else if (X.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    }
+    else {
+        TORCH_CHECK(false, "MXFP4 MLP only supports FP16 and BF16 activations");
+    }
+
+    // ---------------- Contiguous checks ----------------
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    TORCH_CHECK(gate.is_contiguous(), "gate must be contiguous");
+    TORCH_CHECK(gate_scale.is_contiguous(), "gate_scale must be contiguous");
+    TORCH_CHECK(up.is_contiguous(), "up must be contiguous");
+    TORCH_CHECK(up_scale.is_contiguous(), "up_scale must be contiguous");
+    TORCH_CHECK(down.is_contiguous(), "down must be contiguous");
+    TORCH_CHECK(down_scale.is_contiguous(), "down_scale must be contiguous");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+    auto O = torch::empty({N, hidden_dim}, X.options());
+    auto tmp = torch::empty({N, intermediate}, X.options()); // 临时Buffer：由PyTorch Caching Allocator管理
+
+    mlp_forward_mxfp4_cuda(
+        X.data_ptr(),
+        gate.data_ptr(),
+        gate_scale.data_ptr(),
+        up.data_ptr(),
+        up_scale.data_ptr(),
+        down.data_ptr(),
+        down_scale.data_ptr(),
+        static_cast<size_t>(N),
+        static_cast<size_t>(hidden_dim),
+        static_cast<size_t>(intermediate),
+        tmp.data_ptr(),
+        O.data_ptr(),
+        dtype_code
+    );
+
+    return O;
+}
+
+
+
+
 
 
 // 进行python函数注册
@@ -709,6 +867,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("up"),
         pybind11::arg("down")
     );
+
+    m.def(
+        "mlp_forward_mxfp4",
+        &mlp_forward_mxfp4,
+        "MXFP4 MLP Forward",
+        pybind11::arg("X"),
+        pybind11::arg("gate"),
+        pybind11::arg("gate_scale"),
+        pybind11::arg("up"),
+        pybind11::arg("up_scale"),
+        pybind11::arg("down"),
+        pybind11::arg("down_scale")
+);
 }
 
 

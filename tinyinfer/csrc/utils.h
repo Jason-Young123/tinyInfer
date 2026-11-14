@@ -78,6 +78,34 @@ __device__ __forceinline__ float silu_f(float x) {
 }
 
 
+// fp4-quant related; scale: e8m0 -> fp32
+__device__ __forceinline__ float decode_e8m0(uint8_t code) {
+    if (code == 255) return __int_as_float(0x7fc00000);
+    return ldexpf(1.0f, int(code) - 127);
+}
+
+
+// fp4 e2m1 -> fp32
+__device__ __forceinline__ float decode_e2m1(uint32_t code) {
+    uint32_t mag = code & 0x7;
+    uint32_t sign = code & 0x8;
+
+    float val;
+    switch (mag) {
+        case 0: val = 0.0f; break;
+        case 1: val = 0.5f; break;
+        case 2: val = 1.0f; break;
+        case 3: val = 1.5f; break;
+        case 4: val = 2.0f; break;
+        case 5: val = 3.0f; break;
+        case 6: val = 4.0f; break;
+        default: val = 6.0f; break;
+    }
+
+    return sign ? -val : val;
+}
+
+
 
 template <typename T>
 __device__ inline T warp_reduce_sum(T val) {
