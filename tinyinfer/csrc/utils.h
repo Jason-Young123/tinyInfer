@@ -79,14 +79,21 @@ __device__ __forceinline__ float silu_f(float x) {
 
 
 // fp4-quant related; scale: e8m0 -> fp32
-__device__ __forceinline__ float decode_e8m0(uint8_t code) {
+/*__device__ __forceinline__ float decode_e8m0(uint8_t code) {
     if (code == 255) return __int_as_float(0x7fc00000);
     return ldexpf(1.0f, int(code) - 127);
+}*/
+
+__device__ __forceinline__ float decode_e8m0(uint8_t code) {
+    uint32_t special = (code == 0u) | (code == 255u);
+    uint32_t bits = (static_cast<uint32_t>(code) << 23) | (special << 22);
+
+    return __uint_as_float(bits);
 }
 
 
 // fp4 e2m1 -> fp32
-__device__ __forceinline__ float decode_e2m1(uint32_t code) {
+/*__device__ __forceinline__ float decode_e2m1(uint32_t code) {
     uint32_t mag = code & 0x7;
     uint32_t sign = code & 0x8;
 
@@ -103,6 +110,20 @@ __device__ __forceinline__ float decode_e2m1(uint32_t code) {
     }
 
     return sign ? -val : val;
+}*/
+
+__device__ __forceinline__ float decode_e2m1(uint32_t code) {
+    uint32_t mag = code & 0x7u;
+
+    uint32_t exponent = 126u + (mag >> 1);
+    uint32_t mantissa = (mag & 1u) << 22;
+
+    exponent &= 0u - static_cast<uint32_t>(mag != 0u);
+    mantissa &= 0u - static_cast<uint32_t>(mag >= 2u);
+
+    uint32_t bits = (exponent << 23) | mantissa | ((code & 0x8u) << 28);
+
+    return __uint_as_float(bits);
 }
 
 

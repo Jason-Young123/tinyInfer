@@ -151,7 +151,7 @@ class Qwen3MLP(nn.Module):
 
     # 完整的SwiGLU, shape变化: [num_flat_tokens, hidden_size] -> [num_flat_tokens, hidden_size]
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        # version1: torch
+        # version1: torch, 作为N较大时的fallback
         # x = self.gate_up_proj(x)    # [N, hidden_dim] -> [N, 2 * intermediate]        
         # x = self.act(x)             # [N, 2 * intermediate] -> act([N, intermediate]) * [N, intermediate] -> [N, intermediate]        
         # result = self.down_proj(x) # [N, intermediate] -> [N, hidden_dim]
