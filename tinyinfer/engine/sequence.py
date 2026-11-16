@@ -2,6 +2,7 @@ from enum import Enum, auto
 from itertools import count
 from dataclasses import dataclass
 import time
+import math
 
 from tinyinfer.sampling_params import SamplingParams
 
@@ -53,6 +54,9 @@ class Sequence:
         self.first_token_time: float | None = None # TTFT
         self.finished_time: float | None = None
         self.output_token_times: list[float] = [] # 用于计算effective per-token latency; SD一轮多token时按round latency均摊
+
+        # perplexity
+        self.sum_nll = 0
 
     @property
     def num_tokens(self) -> int: # 有property修饰的成员函数可以直接像访问成员变量一样访问
@@ -233,6 +237,11 @@ class Sequence:
         if e2e_latency is not None and e2e_latency > 0:
             request_throughput = output_tokens / e2e_latency
 
+        # Perplexity
+        perplexity = None
+        if output_tokens > 0:
+            perplexity = math.exp(self.sum_nll / output_tokens)
+
         return {
             # token statistics
             "prompt_tokens": prompt_tokens,
@@ -260,6 +269,9 @@ class Sequence:
             # throughput
             "decode_throughput": decode_throughput,
             "request_throughput": request_throughput,
+
+            # perplexity
+            "perplexity": perplexity,
         }
 
 

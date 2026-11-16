@@ -30,6 +30,7 @@ PERFORMANCE_KEYS = (
     "tpot",
     "decode_throughput",
     "request_throughput",
+    "perplexity"
 )
 
 

@@ -92,7 +92,7 @@ class LLMEngine:
 
     def step_with_updates(self) -> tuple[list, list[StreamUpdate]]:
         # 对内: 走通schedule -> run -> postprocess的完整一轮调度流程
-        output, K = self.scheduler.schedule() # 从waiting池子中挑选本轮进行推理的请求
+        output, K = self.scheduler.schedule() # 从waiting/running池子中挑选本轮进行推理的请求
         if not output.items:
             return [], []
         sampled_tokens = self.model_runner.run(output, K) # 输出为dict of {seq_id: token_id_list}, 表示所有需要采样的请求所产生的下一个token id是什么

@@ -4,7 +4,7 @@ import torch
 from tinyinfer.utils.context import set_context, reset_context
 from tinyinfer.engine.sequence import SchedulerOutput
 from tinyinfer.layers.attention import PagedKVCache
-from tinyinfer.layers.sampler import Sampler
+from tinyinfer.layers.sampler import Sampler, compute_nll
 from tinyinfer.models.qwen3 import Qwen3ForCausalLM
 from tinyinfer.utils.loader import load_weights
 from tinyinfer.engine.speculative import speculative_verify
@@ -421,7 +421,6 @@ class ModelRunner:
                 )
 
 
-
             temperatures = torch.tensor( # 为每个需要sample的seq设置temperature, shape = [sampled_seq]
                 [item.seq.sampling_params.temperature for item in sample_items],
                 dtype=logits.dtype,
@@ -437,7 +436,6 @@ class ModelRunner:
                 dtype=torch.bool,
                 device=logits.device,
             )
-
             tokens, _ = self.sampler( # 进行采样
                 logits=logits,
                 temperatures=temperatures,
@@ -445,12 +443,18 @@ class ModelRunner:
                 greedy_mask=greedy_mask,
                 isDistributionOut = False
             )
+            nll = compute_nll(logits, tokens)
 
             # 哪个seq增加了哪个token; 并非所有item都会增加token
             # 注意tolist会触发GPU和CPU同步; 只有同步之后才可以统计GPU侧执行耗时
-            result = {item.seq.seq_id: [int(token)] for item, token in zip(sample_items, tokens.tolist())}
-            return result
-        
+            sample_stats = torch.stack((tokens.to(torch.float64), nll.to(torch.float64)), dim=1).tolist()
+            result = {}
+            for item, (token, token_nll) in zip(sample_items, sample_stats):
+                item.seq.sum_nll += token_nll
+                result[item.seq.seq_id] = [int(token)]
+
+            return result # 仍返回哪个seq增加了哪个token, nll的信息已经就地更新
+
         finally:
             # Context 是一次 forward 的动态状态，绝不能泄漏到下一轮
             reset_context()
@@ -501,8 +505,8 @@ class ModelRunner:
         draft_probs: dict[int, list[torch.Tensor]] = {item.seq.seq_id: [] for item in decode_items}  # 即Q矩阵, shape = [K, V]
         #target_probs: dict[int, list[torch.Tensor]] = {item.seq.seq_id: [] for item in decode_items} # 即P矩阵, shape = [K + 1, V]
         target_probs: dict[int, torch.Tensor] = {}
-        if DEBUG:
-            target_raw_logits: dict[int, torch.Tensor] = {} # for debug only
+        target_raw_logits: dict[int, torch.Tensor] = {}
+
         decode_start: dict[int, int] = {item.seq.seq_id: item.start_pos for item in decode_items}
 
         # 为保险额外检查draft/target kv cache reservation情况; 相应逻辑理应由schedule处理, 这里是防御性编程
@@ -586,7 +590,7 @@ class ModelRunner:
                     greedy_mask = torch.tensor([item.seq.sampling_params.greedy for item in decode_items], dtype=torch.bool, device=logits.device)
 
                     # 正式采样并返回q(x)
-                    tokens, draft_distributions = self.sampler(logits=logits, temperatures=temperatures, topks=topks, greedy_mask=greedy_mask, isDistributionOut=True)
+                    tokens, draft_distributions, _ = self.sampler(logits=logits, temperatures=temperatures, topks=topks, greedy_mask=greedy_mask, isDistributionOut=True)
 
                     for i in range(len(decode_items)): # 获取decode batch中每个seq本轮生成的token
                         item = decode_items[i]
@@ -706,11 +710,12 @@ class ModelRunner:
                 left, right = flat_sample_mask_cumsum[item_idx], flat_sample_mask_cumsum[item_idx + 1]
                 if item.is_prefill: # 如果是final prefill, 直接记录结果
                     if item.sample_after:
-                        results[item.seq.seq_id] = [int(target_tokens[left].item())] 
+                        results[item.seq.seq_id] = [int(target_tokens[left].item())]
+                        # 统计nll
+                        item.seq.sum_nll += compute_nll(target_logits[left:left + 1], target_tokens[left:left + 1]).sum().item()
                     continue
                 target_probs[item.seq.seq_id] = target_distributions[left:right] # 如果是decode, 则记录P矩阵
-                if DEBUG:
-                    target_raw_logits[item.seq.seq_id] = target_logits[left:right] # for debug only
+                target_raw_logits[item.seq.seq_id] = target_logits[left:right]
 
         finally:
             reset_context()
@@ -732,6 +737,11 @@ class ModelRunner:
             eos_token_id = (-1 if seq.sampling_params.ignore_eos else self.config.eos_token_id)
             final_tokens, accepted_count = speculative_verify(proposals, Q, P, eos_token_id)
             results[seq_id] = final_tokens
+
+            # 根据最终输出 Token 计算 Target NLL
+            raw_logits = target_raw_logits[seq_id][:len(final_tokens)]
+            final_tokens_tensor = torch.tensor(final_tokens, dtype=torch.long, device=raw_logits.device)
+            seq.sum_nll += compute_nll(raw_logits, final_tokens_tensor).sum().item()
 
             batch_proposed += len(proposals)
             batch_accepted += accepted_count

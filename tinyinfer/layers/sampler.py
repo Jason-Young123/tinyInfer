@@ -70,3 +70,14 @@ class Sampler(nn.Module): # shape变化: [sampled_seq, vocab_size] -> [sampled_s
 
 
 
+# 由logits和最终选中的token id计算nll
+# [N, V], [N] -> [N]
+def compute_nll(logits: torch.Tensor, tokens: torch.Tensor):
+    logits = logits.float()
+    log_z = torch.logsumexp(logits, dim=-1)
+    selected_logits = logits.gather(
+        -1, tokens.unsqueeze(-1)
+    ).squeeze(-1)
+    return log_z - selected_logits
+
+
