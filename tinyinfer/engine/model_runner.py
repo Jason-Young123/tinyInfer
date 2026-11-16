@@ -590,7 +590,7 @@ class ModelRunner:
                     greedy_mask = torch.tensor([item.seq.sampling_params.greedy for item in decode_items], dtype=torch.bool, device=logits.device)
 
                     # 正式采样并返回q(x)
-                    tokens, draft_distributions, _ = self.sampler(logits=logits, temperatures=temperatures, topks=topks, greedy_mask=greedy_mask, isDistributionOut=True)
+                    tokens, draft_distributions = self.sampler(logits=logits, temperatures=temperatures, topks=topks, greedy_mask=greedy_mask, isDistributionOut=True)
 
                     for i in range(len(decode_items)): # 获取decode batch中每个seq本轮生成的token
                         item = decode_items[i]

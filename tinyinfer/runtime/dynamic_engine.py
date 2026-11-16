@@ -6,6 +6,7 @@ from queue import Empty, Queue
 from threading import Event, Lock, Thread
 import time
 from typing import Callable
+import traceback
 
 from tinyinfer.engine.llm_engine import LLMEngine
 from tinyinfer.sampling_params import SamplingParams
@@ -320,10 +321,11 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
             try:
                 items, updates = self.engine.step_with_updates()
                 if not items and not self.engine.scheduler.is_finished():
-                    raise RuntimeError("scheduler made no progress while requests remain")
+                    raise RuntimeError("Fatal: Scheduler made no progress while requests remain")
                 any_finished = self._handle_updates(updates) # 检查是否有seq请求推理完毕; 刷新全局perf statistics
-                self._emit_runtime_snapshot(force=True)
+                self._emit_runtime_snapshot(force=any_finished)
             except Exception as exc:
+                traceback.print_exc()
                 self._fail_active_requests(str(exc))
                 self._emit_runtime_snapshot(force=True)
                 return

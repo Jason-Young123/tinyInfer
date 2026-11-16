@@ -35,6 +35,7 @@ const ws = new WebSocket(`ws://${location.host}/ws`);
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const SD_TREND_VISIBLE_POINTS = 100;
+const PROFILER_WINDOW_SIZE = 150;
 let previousSdCounters = null;
 let sdTrendSamples = [];
 
@@ -497,7 +498,7 @@ function renderProfilerChart(state) {
   const margin = {top: 38, right: 18, bottom: 34, left: 64};
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
-  const samples = state.samples.slice(-200);
+  const samples = state.samples.slice(-PROFILER_WINDOW_SIZE);
   const count = samples.length;
 
   if (!count) {
@@ -569,7 +570,7 @@ function renderProfilerChart(state) {
   }
   svg.appendChild(grid);
 
-  // Calculate averages from the currently visible (latest up to 200) samples.
+  // Calculate averages from the currently visible (latest up to PROFILER_WINDOW_SIZE) samples.
   const cpuValues = cpu.filter(value => Number.isFinite(value));
   const gpuValues = gpu.filter(value => value != null && Number.isFinite(value));
   const cpuAvg = cpuValues.length
@@ -684,12 +685,16 @@ function updateProfiler(event) {
     for (const sample of (item.samples ?? [])) {
       state.samples.push([Number(sample[0]), sample[1] == null ? null : Number(sample[1])]);
     }
-    if (state.samples.length > 150) {
-      state.samples.splice(0, state.samples.length - 150);
+    if (state.samples.length > PROFILER_WINDOW_SIZE) {
+      state.samples.splice(0, state.samples.length - PROFILER_WINDOW_SIZE);
     }
 
     state.totalSamples = incomingTotal;
-    state.countNode.textContent = `${state.totalSamples.toLocaleString()} samples`;
+    //state.countNode.textContent = `${state.totalSamples.toLocaleString()} samples`;
+    const windowCount = state.samples.length;
+    state.countNode.textContent = state.totalSamples > windowCount
+        ? `Last ${windowCount} / ${state.totalSamples.toLocaleString()}`
+        : `${windowCount} samples`;
     renderProfilerChart(state);
   }
 
