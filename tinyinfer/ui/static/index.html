@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tinyInfer Console</title>
-  <link rel="stylesheet" href="/static/style.css?v=advance07-profiler-v1">
+  <link rel="stylesheet" href="/static/style.css?v=advance08-mxfp4-quant">
 </head>
 <body>
   <main class="shell">
@@ -70,7 +70,19 @@
             <div class="metric-card"><span>P99</span><strong data-tpot-percentile="p99">--</strong></div>
           </div>
           <div class="percentile-head">Cache Hit Rate</div>
-          <div class="percentile-grid"><div class="metric-card"><span>Completed requests mean</span><strong id="performance-cache-hit-rate">--</strong></div></div>
+          <div class="percentile-grid">
+            <div class="metric-card">
+              <span>Completed requests mean</span>
+              <strong id="performance-cache-hit-rate">--</strong>
+            </div>
+          </div>
+          <div class="percentile-head">Perplexity</div>
+          <div class="percentile-grid">
+            <div class="metric-card">
+              <span>Completed requests mean</span>
+              <strong id="performance-perplexity">--</strong>
+            </div>
+          </div>
         </section>
       </section>
 
@@ -139,6 +151,6 @@
     </aside>
   </main>
 
-  <script src="/static/app.js?v=advance07-profiler-v1"></script>
+  <script src="/static/app.js?v=advance08-mxfp4-quant"></script>
 </body>
 </html>

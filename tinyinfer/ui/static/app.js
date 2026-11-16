@@ -100,9 +100,15 @@ function makePanel(userId, index) {
             <div class="user-stat-row single">
               <div class="user-stat"><span>E2E</span><strong class="stat-e2e">--</strong></div>
             </div>
-            <div class="user-stat-row single"> <!-- # [MOD] -->
+            <div class="user-stat-row single">
               <div class="user-stat"><span>Cache Hit Rate</span><strong class="stat-cache-hit-rate">--</strong></div> <!-- # [MOD] -->
-            </div> <!-- # [MOD] -->
+            </div>
+            <div class="user-stat-row single">
+              <div class="user-stat">
+                <span>Perplexity</span>
+                <strong class="stat-perplexity">--</strong>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -128,6 +134,7 @@ function makePanel(userId, index) {
     statTPOTP99: panel.querySelector(".stat-tpot-p99"), // [MOD]
     statE2E: panel.querySelector(".stat-e2e"),
     statCacheHitRate: panel.querySelector(".stat-cache-hit-rate"), // # [MOD]
+    statPerplexity: panel.querySelector(".stat-perplexity"),
     busy: false,
     outputBase: "",
     followOutput: true,
@@ -266,9 +273,14 @@ function formatMemoryPart(bytes, total) {
   return `${formatBytes(bytes)} · ${percent.toFixed(1)}%`;
 }
 
-function formatRate(value) { // # [MOD]
-  return value == null ? "--" : `${(value * 100).toFixed(1)}%`; // # [MOD]
-} // # [MOD]
+function formatRate(value) { 
+  return value == null ? "--" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatPerplexity(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "--";
+  return Number(value).toFixed(2);
+}
 
 function updateUserStatistics(state, statistics) {
   if (!statistics) return;
@@ -287,6 +299,7 @@ function updateUserStatistics(state, statistics) {
   state.statTPOTP99.textContent = formatLatency(statistics.tpot_p99); // [MOD]
   state.statE2E.textContent = formatSeconds(statistics.e2e_latency);
   state.statCacheHitRate.textContent = formatRate(statistics.cache_hit_rate); // # [MOD]
+  state.statPerplexity.textContent = formatPerplexity(statistics.perplexity);
 }
 
 function setSegment(id, bytes, total) {
@@ -405,6 +418,7 @@ function updatePerformance(performance) {
     card.textContent = kind === "throughput" ? formatThroughput(averages[key]) : formatLatency(averages[key]);
   }
   document.querySelector("#performance-cache-hit-rate").textContent = formatRate(performance.cache_hit_rate);
+  document.querySelector("#performance-perplexity").textContent = formatPerplexity(averages.perplexity);
   const percentiles = performance.tpot_percentiles ?? {};
   for (const key of ["p50", "p95", "p99"]) {
     document.querySelector(`[data-tpot-percentile="${key}"]`).textContent = formatLatency(percentiles[key]);
@@ -913,6 +927,7 @@ ws.addEventListener("message", (message) => {
 
   if (event.type === "token") {
     updateOutput(state, state.outputBase + (event.text ?? ""));
+    state.statPerplexity.textContent = formatPerplexity(event.statistics?.perplexity);
     return;
   }
 

@@ -266,6 +266,7 @@ class DynamicEngineService: # 将LLMEngine包装为动态调度引擎
                     user_id=user_id,
                     seq_id=update.seq_id,
                     text=text,
+                    statistics=update.statistics,
                 )
             )
 

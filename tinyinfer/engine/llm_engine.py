@@ -12,7 +12,7 @@ from tinyinfer.sampling_params import SamplingParams
 # (1)resource statistics, 即memory profiling结果, 由block_manager提供
 # (2)speculative decoding statistics, 即SD模式下性能统计, 由model_runner提供
 # (3)seq-level performance statistics, 即每个seq的运行指标比如TTFT、TPOT、cache hit rate等, 由每个seq提供
-# 其中第(3)个新能数据需要顶层dynamic engine进行统计平均; (1)(2)则只需要顶层进行展示即可
+# 其中第(3)个性能数据需要顶层dynamic engine进行统计平均; (1)(2)则只需要顶层进行展示即可
 
 
 @dataclass(slots=True)
@@ -113,7 +113,8 @@ class LLMEngine:
                         seq.token_ids[seq.num_prompt_tokens:]
                     ),
                     finished=seq.is_finished,
-                    statistics=seq.statistics() if seq.is_finished else None,
+                    statistics=seq.statistics(),
+                    #statistics=seq.statistics() if seq.is_finished else None,
                 )
             )
 
