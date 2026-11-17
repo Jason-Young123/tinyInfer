@@ -30,6 +30,7 @@ _ATTN_ROPE_PROFILER = TimeProfiler().register(name="rope in attn", description="
 _ATTN_MAIN_PROFILER = TimeProfiler().register(name="attn_main in attn", description="Profiler for attn_main in attention layer", cycle=35, enabled=True)
 _ATTN_O_PROJ_PROFILER = TimeProfiler().register(name="o_proj in attn", description="Profiler for o_proj in attention layer", cycle=35, enabled=True)
 
+_LM_HEAD_PROFILER = TimeProfiler().register(name="lm_head", description="Profiler for lm_head", cycle=1, enabled=True)
 
 
 
@@ -280,7 +281,11 @@ class Qwen3ForCausalLM(nn.Module):
 
     # compute_logits 产出[num_flat_tokens, vocab_size], 仍然不是最终的next_token id list; 还差一个sampler
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.lm_head(hidden_states)
+        _LM_HEAD_PROFILER.record_start()
+        result = self.lm_head(hidden_states)
+        _LM_HEAD_PROFILER.record_end()
+        
+        return result
 
     # forward + compute_logits + sampler才会生成next token id
 

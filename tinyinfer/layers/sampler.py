@@ -1,5 +1,9 @@
 import torch
 from torch import nn
+from tinyinfer.utils.profiler import TimeProfiler
+
+_SAMPLER_PROFILER = TimeProfiler().register(name="Sampler", description="Profiler for sampler", cycle=1, enabled=True)
+
 
 
 # 对若干独立的 logits 向量分别进行采样, 输出采样结果(和分布向量)
@@ -15,6 +19,8 @@ class Sampler(nn.Module): # shape变化: [sampled_seq, vocab_size] -> [sampled_s
         greedy_mask: torch.Tensor | None = None,    # [N]
         isDistributionOut: bool = False             # bool
     ) -> tuple[torch.Tensor, torch.Tensor | None]:  # [N], [N, V]
+
+        _SAMPLER_PROFILER.record_start()
         if logits.ndim != 2:
             raise ValueError("logits must be [num_samples, vocab_size]")
         n = logits.shape[0]
@@ -64,6 +70,7 @@ class Sampler(nn.Module): # shape变化: [sampled_seq, vocab_size] -> [sampled_s
                 u = torch.rand_like(scaled).clamp_min_(1e-10) # U ~ Uniform(0, 1); 因为rand_like生成的范围是[0, 1)而非(0, 1), 故要用clamp约束下界
                 gumbel = -torch.log(-torch.log(u)) # G ~ Gumbel(0, 1)
                 result[sample_mask] = (scaled + gumbel).argmax(dim=-1)
+        _SAMPLER_PROFILER.record_end()
 
         return result, distributions
 
