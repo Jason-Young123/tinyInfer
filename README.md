@@ -19,6 +19,7 @@ The current implementation supports Qwen3 models and includes:
 
 ### Inference Optimizations
 - Speculative Decoding
+- MXFP4 Weight-only Quantization for MLP Layer
 
 ### Observability & Web UI
 - Runtime performance statistics
@@ -37,6 +38,7 @@ MAX_JOBS=4 python -m pip install -e . --no-build-isolation
 ```bash
 python examples/advance07_sd.py \
   --attention-backend torch \
+  [--quantization mxfp4] \
   --model /path/to/local/target/model \
   [--speculative] \
   [--draft-model /path/to/local/draft/model]
@@ -48,6 +50,7 @@ python examples/advance07_sd.py \
 ```bash
 python examples/advance07_sd.py \
   --attention-backend flash \
+  [--quantization mxfp4] \
   --model /path/to/local/target/model \
   [--speculative] \
   [--draft-model /path/to/local/draft/model]
