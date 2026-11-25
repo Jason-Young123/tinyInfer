@@ -26,7 +26,8 @@ setup(
                 "tinyinfer/csrc/rope.cu",
                 "tinyinfer/csrc/linear.cu",
                 "tinyinfer/csrc/mlp.cu",
-                "tinyinfer/csrc/mlp_fp4.cu"
+                "tinyinfer/csrc/mlp_fp4.cu",
+                "tinyinfer/csrc/lm_head.cu"
             ],
 
             # CUTLASS Header-only library

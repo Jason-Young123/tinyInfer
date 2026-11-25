@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "utils.cuh"
 
 
 constexpr int MLP_THREADS = 256;

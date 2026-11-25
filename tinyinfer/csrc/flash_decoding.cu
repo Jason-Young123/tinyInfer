@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "utils.cuh"
 
 // Flash-Decoding 固定一个 CTA = 4 warps = 128 threads。
 constexpr int FLASH_DECODING_NUM_WARPS = 4;

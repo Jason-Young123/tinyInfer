@@ -795,6 +795,92 @@ torch::Tensor mlp_forward_mxfp4(
 
 
 
+/********************** defined in: lm_head.cu **********************/
+extern "C" void lm_head_forward_cuda(
+    const void* X,       // [M, hidden_size]
+    const void* weight,  // [vocab_size, hidden_size]
+    size_t M,
+    size_t hidden_size,
+    size_t vocab_size,
+    void* O,             // [M, vocab_size]
+    int dtype_code
+);
+
+torch::Tensor lm_head_forward(
+    torch::Tensor X,       // [M, hidden_size]
+    torch::Tensor weight   // [vocab_size, hidden_size]
+) {
+    // ---------------- CUDA checks ----------------
+    TORCH_CHECK(X.is_cuda(), "X must be a CUDA tensor");
+    TORCH_CHECK(weight.is_cuda(), "weight must be a CUDA tensor");
+
+    // ---------------- Device checks ----------------
+    TORCH_CHECK(X.device() == weight.device(), "X/weight device mismatch");
+
+    // ---------------- Shape checks ----------------
+    TORCH_CHECK(X.dim() == 2, "X must be [M, hidden_size]");
+    TORCH_CHECK(weight.dim() == 2, "weight must be [vocab_size, hidden_size]");
+
+    const int64_t M = X.size(0);
+    const int64_t hidden_size = X.size(1);
+    const int64_t vocab_size = weight.size(0);
+
+    TORCH_CHECK(M > 0, "M must be positive");
+    TORCH_CHECK(hidden_size > 0, "hidden_size must be positive");
+    TORCH_CHECK(vocab_size > 0, "vocab_size must be positive");
+    TORCH_CHECK(weight.size(1) == hidden_size, "weight shape mismatch");
+
+    // ---------------- Batch size warning ----------------
+    if (M > 32) {
+        TORCH_WARN_ONCE("LM Head: M = ", M, " is relatively large, which may result in poor performance.");
+    }
+    TORCH_CHECK(M <= 65535, "M exceeds the supported gridDim.y limit (65535)");
+
+    // ---------------- Dtype checks ----------------
+    TORCH_CHECK(
+        X.scalar_type() == weight.scalar_type(),
+        "X and weight must have the same dtype"
+    );
+
+    int dtype_code = -1;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else if (X.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    }
+    else if (X.scalar_type() == at::kFloat) {
+        dtype_code = 2;
+    }
+    else {
+        TORCH_CHECK(false, "LM Head only supports FP16, BF16 and FP32");
+    }
+
+    // ---------------- Contiguous checks ----------------
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    TORCH_CHECK(weight.is_contiguous(), "weight must be contiguous");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+
+    auto O = torch::empty({M, vocab_size}, X.options());
+
+    lm_head_forward_cuda(
+        X.data_ptr(),
+        weight.data_ptr(),
+        static_cast<size_t>(M),
+        static_cast<size_t>(hidden_size),
+        static_cast<size_t>(vocab_size),
+        O.data_ptr(),
+        dtype_code
+    );
+
+    return O;
+}
+
+
+
+
+
 
 // 进行python函数注册
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -879,7 +965,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("up_scale"),
         pybind11::arg("down"),
         pybind11::arg("down_scale")
-);
+    );
+
+    m.def(
+        "lm_head_forward",
+        &lm_head_forward,
+        "LM Head Forward",
+        pybind11::arg("X"),
+        pybind11::arg("weight")
+    );
 }
 
 

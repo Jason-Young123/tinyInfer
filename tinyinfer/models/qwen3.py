@@ -16,7 +16,7 @@ from tinyinfer.utils.extension import load_extension
 
 
 
-_EMBED_PROFILER = TimeProfiler().register(name="embedding_layer", description="Profiler for embedding layer", cycle=1, enabled=False)
+_EMBED_PROFILER = TimeProfiler().register(name="embedding_layer", description="Profiler for embedding layer", cycle=1, enabled=True)
 
 _DECODER_LAYER_PROFILER = TimeProfiler().register(name="decoder_layer", description="Profiler for entire decoder layer", cycle=35, enabled=False)
 _LAYERNORM1_PROFILER = TimeProfiler().register(name="layer_norm1", description="Profiler for layernorm1", cycle=35, enabled=True)

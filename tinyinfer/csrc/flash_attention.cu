@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "utils.cuh"
 
 
 //对应flash attention v2原文算法, block采用三维布局

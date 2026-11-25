@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "utils.cuh"
 
 constexpr int ROPE_THREADS = 128;
 

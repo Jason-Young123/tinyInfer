@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "utils.cuh"
 
 constexpr int RMSNORM_NUM_WARPS = 4;
 constexpr int RMSNORM_THREADS = 128;

@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cuda/std/numeric>
 
 #include <cmath>
 #include <stdexcept>
@@ -148,3 +149,62 @@ __device__ inline T warp_reduce_max(T val) {
     }
     return val;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// 有关smem访问;
+// 注意constexpr自带inline, 可以直接放在.h文件中;
+// __host__代表该函数可以由cpu端函数直接调用; __device__代表该函数可以由__global__或者其他__device__函数调用;
+// __device__本身不代表该函数一定在gpu端运行, 也可以在编译期由cpu调用
+// 常见smem访存场景下寻找最小的 bank-conflict-free stride bytes
+__host__ __device__ constexpr int get_min_stride_bytes(
+    int row_bytes,              // 原本每一行有多少Bytes
+    int lanes_per_row,          // 多少个lane负责取同一行的数据
+    int bytes_per_lane,         // 每个lane一次取多少bytes
+    int alignment_bytes = 16    // 最终的stride需要满足多少字节对齐
+) {
+    // 仅支持 lanes_per_row = 1/2/4/8/16/32
+    if (lanes_per_row <= 0 || 32 % lanes_per_row != 0) return -1;
+    // 仅支持 bytes_per_lane = 4/8/16
+    if(!(bytes_per_lane == 4 || bytes_per_lane == 8 || bytes_per_lane == 16)) return -1;
+    if (alignment_bytes <= 0 || row_bytes <= 0) return -1;
+
+    int V = bytes_per_lane;
+    int C = lanes_per_row * V;
+    int A = alignment_bytes;
+
+    if (C > row_bytes) return -1;
+
+    // C >= 128, 直接向上对齐至lcm(A, V) byte即可
+    if (C >= 128) {
+        int X = cuda::std::lcm(A, V);
+        return (row_bytes + X - 1) / X * X;
+    }
+
+    //计算stride逻辑; stride需要同时为C的奇数倍和A的整数倍, 且不小于row_bytes
+    int X = cuda::std::lcm(A, C);
+    if ((X / C) % 2 == 0) {
+        return -1;
+    }
+    else {
+        int q = (row_bytes + X - 1) / X;
+        return (q | 1) * X;
+    }
+}
+
+
+
+
+
+
