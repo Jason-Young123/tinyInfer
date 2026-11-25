@@ -40,8 +40,8 @@ class LinearMXFP4(nn.Module):
         self.out_features = out_features # 输出shape的最后一维大小
         assert in_features % 32 == 0
         # 注意量化之后weight_packed和weight_scale的存储类型都是uint8
-        self.weight_packed = nn.Parameter(torch.empty(out_features, in_features//2, dtype=torch.uint8, device=device), requires_grad=False)
-        self.weight_scale = nn.Parameter(torch.empty(out_features, in_features // 32, dtype=torch.uint8, device = device), requires_grad=False)
+        self.weight_packed = nn.Parameter(torch.empty(out_features, in_features // 2, dtype=torch.uint8, device=device), requires_grad=False)
+        self.weight_scale = nn.Parameter(torch.empty(out_features, in_features // 32, dtype=torch.uint8, device=device), requires_grad=False)
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
         else:

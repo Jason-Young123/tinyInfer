@@ -13,7 +13,7 @@ constexpr int LM_HEAD_NUM_WARPS = LM_HEAD_THREADS / 32;
 
 
 
-/************************************** gemv ************************************/
+/************************************** 1. gemv ************************************/
 // 一个 Warp 负责一个 Vocabulary Logit; 针对GEMV或者小M GEMM
 // Grid = [ceil(vocab_size / 8), M]
 template <typename T, int VEC_SIZE>
@@ -116,7 +116,7 @@ void launch_lm_head_gemv_typed(
 
 
 
-/*********************************** gemm_ccore *************************************/
+/*********************************** 2. gemm_ccore *************************************/
 template <typename T, int VEC_SIZE, int M_TILE>
 __global__ void lm_head_gemm_ccore(
     const T* __restrict__ X,
@@ -147,7 +147,7 @@ __global__ void lm_head_gemm_ccore(
 
     float sum[M_TILE] = {0.f};
 
-    #pragma unroll 1
+    #pragma unroll
     for (size_t iter = 0; iter < num_iters; ++iter) {
         size_t idx = laneid + iter * warpSize;
 
@@ -205,14 +205,12 @@ void launch_lm_head_gemm_ccore_typed(
 
 
 
-/***************************** gemm_tcore: cp.async + wmma + wmma *****************************/
-/*
 // WMMA_* 为固定参数
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 
-
+/***************************** 3. gemm_tcore: cp.async + wmma + wmma *****************************/
 // One Warp computes one (M_TILE x N_TILE) output tile.
 // One CTA contains 4 independent Warps, producing a M_TILE x (4 * N_TILE) output tile.
 template <int M_TILE, int K_TILE, int N_TILE, int PP_STAGE>
@@ -369,15 +367,10 @@ __global__ void lm_head_gemm_tcore(
         }
     }
 }
-*/
 
 
 
-
-
-
-
-/******************************* gemm_tcore: cp.async + ldmatrix + mma *******************************/
+/******************************* 4. gemm_tcore: cp.async + ldmatrix + mma *******************************/
 /*
 // WMMA_* 为固定参数
 constexpr int WMMA_M = 16;
@@ -540,17 +533,11 @@ __global__ void lm_head_gemm_tcore(
 
 
 
-/******************************* gemm_tcore: tma + wmma + wmma *******************************/
-// WMMA_* 为固定参数
-constexpr int WMMA_M = 16;
-constexpr int WMMA_N = 16;
-constexpr int WMMA_K = 16;
-
-
-// One Warp computes one (M_TILE x N_TILE) output tile.
+/******************************* 5. gemm_tcore: tma + wmma + wmma *******************************/
+/*// One Warp computes one (M_TILE x N_TILE) output tile.
 // One CTA contains 4 independent Warps, producing a M_TILE x (4 * N_TILE) output tile.
 template <int M_TILE, int K_TILE, int N_TILE, int PP_STAGE>
-__global__ void lm_head_gemm_tcore(
+__global__ void lm_head_gemm_tcore_tma(
     const __grid_constant__ CUtensorMap tensor_map_A,
     const __grid_constant__ CUtensorMap tensor_map_B,
     size_t M,
@@ -561,31 +548,21 @@ __global__ void lm_head_gemm_tcore(
     // Compile-time parameters.
     constexpr int K_STRIDE = K_TILE;
     constexpr int N_STRIDE_BYTES = get_min_stride_bytes(WMMA_N * sizeof(float), 4, 8);
-
-    static_assert(N_STRIDE_BYTES > 0 && N_STRIDE_BYTES % 16 == 0,
-                  "Invalid WMMA output stride");
-
     constexpr int N_STRIDE = N_STRIDE_BYTES / sizeof(float);
     constexpr int M_TILES = M_TILE / WMMA_M;
     constexpr int N_TILES = N_TILE / WMMA_N;
 
-    constexpr uint32_t BYTES_A =
-        M_TILE * K_TILE * sizeof(__nv_bfloat16);
-
-    constexpr uint32_t BYTES_B =
-        LM_HEAD_NUM_WARPS * N_TILE * K_TILE * sizeof(__nv_bfloat16);
-
+    constexpr uint32_t BYTES_A = M_TILE * K_TILE * sizeof(__nv_bfloat16);
+    constexpr uint32_t BYTES_B = LM_HEAD_NUM_WARPS * N_TILE * K_TILE * sizeof(__nv_bfloat16);
     constexpr uint32_t TMA_BYTES = BYTES_A + BYTES_B;
 
-    static_assert(M_TILE > 0 && K_TILE > 0 && N_TILE > 0,
-                  "Invalid tile size");
+    static_assert(N_STRIDE_BYTES > 0 && N_STRIDE_BYTES % 16 == 0, "Invalid WMMA output stride");
+    static_assert(M_TILE > 0 && K_TILE > 0 && N_TILE > 0, "Invalid tile size");
     static_assert(M_TILE % WMMA_M == 0, "Invalid M_TILE");
     static_assert(K_TILE % WMMA_K == 0, "Invalid K_TILE");
     static_assert(N_TILE % WMMA_N == 0, "Invalid N_TILE");
     static_assert(PP_STAGE >= 2, "Invalid PP_STAGE");
-
-    static_assert(BYTES_A % 128 == 0 && BYTES_B % 128 == 0,
-                  "Invalid TMA shared memory alignment");
+    static_assert(BYTES_A % 128 == 0 && BYTES_B % 128 == 0, "Invalid TMA shared memory alignment");
 
     // A/B tile in shared memory; continuous row-major layout.
     struct SharedAB {
@@ -618,8 +595,6 @@ __global__ void lm_head_gemm_tcore(
         for (int stage = 0; stage < PP_STAGE; ++stage) {
             cuda::ptx::mbarrier_init(&smem.ab.barrier[stage], 1);
         }
-
-        // Make barrier initialization visible to the async proxy.
         cuda::ptx::fence_proxy_async(cuda::ptx::space_shared);
     }
     __syncthreads();
@@ -627,17 +602,9 @@ __global__ void lm_head_gemm_tcore(
     uint32_t barrier_phase[PP_STAGE] = {};
 
     // WMMA Fragments and FP32 Accumulators.
-    wmma::fragment<wmma::matrix_a,
-        WMMA_M, WMMA_N, WMMA_K,
-        __nv_bfloat16, wmma::row_major> a_frag[M_TILES];
-
-    wmma::fragment<wmma::matrix_b,
-        WMMA_M, WMMA_N, WMMA_K,
-        __nv_bfloat16, wmma::col_major> b_frag[N_TILES];
-
-    wmma::fragment<wmma::accumulator,
-        WMMA_M, WMMA_N, WMMA_K,
-        float> c_frag[M_TILES][N_TILES];
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major> a_frag[M_TILES];
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::col_major> b_frag[N_TILES];
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag[M_TILES][N_TILES];
 
     #pragma unroll
     for (int i = 0; i < M_TILES; ++i) {
@@ -651,19 +618,9 @@ __global__ void lm_head_gemm_tcore(
     size_t num_iters = K / K_TILE;
 
     // Prologue: Prefetch the first PP_STAGE - 1 tiles.
-    for (int stage = 0;
-         stage < PP_STAGE - 1 && static_cast<size_t>(stage) < num_iters;
-         ++stage) {
-
+    for (int stage = 0; stage < PP_STAGE - 1 && static_cast<size_t>(stage) < num_iters; ++stage) {
         size_t k0 = static_cast<size_t>(stage) * K_TILE;
-
-        tma_load_2d_pair(
-            &smem.ab.sA[stage][0], &tensor_map_A,
-            static_cast<int32_t>(k0), static_cast<int32_t>(m0),
-            &smem.ab.sB[stage][0], &tensor_map_B,
-            static_cast<int32_t>(k0), static_cast<int32_t>(n0),
-            &smem.ab.barrier[stage], TMA_BYTES
-        );
+        tma_load_2d_pair(&smem.ab.sA[stage][0], &tensor_map_A, static_cast<int32_t>(k0), static_cast<int32_t>(m0), &smem.ab.sB[stage][0], &tensor_map_B, static_cast<int32_t>(k0), static_cast<int32_t>(n0), &smem.ab.barrier[stage], TMA_BYTES);
     }
     __syncthreads();
 
@@ -681,46 +638,23 @@ __global__ void lm_head_gemm_tcore(
         // Stage 2: Prefetch NEXT A/B tiles asynchronously.
         if (prefetch_iter < num_iters) {
             size_t next_k0 = prefetch_iter * K_TILE;
-
-            tma_load_2d_pair(
-                &smem.ab.sA[next][0], &tensor_map_A,
-                static_cast<int32_t>(next_k0), static_cast<int32_t>(m0),
-                &smem.ab.sB[next][0], &tensor_map_B,
-                static_cast<int32_t>(next_k0), static_cast<int32_t>(n0),
-                &smem.ab.barrier[next], TMA_BYTES
-            );
-
-            // Ensure TMA has been issued before proceeding.
-            // This does not wait for the actual data transfer.
+            tma_load_2d_pair(&smem.ab.sA[next][0], &tensor_map_A, static_cast<int32_t>(next_k0), static_cast<int32_t>(m0), &smem.ab.sB[next][0], &tensor_map_B, static_cast<int32_t>(next_k0), static_cast<int32_t>(n0), &smem.ab.barrier[next], TMA_BYTES);
             __syncthreads();
         }
 
         // Stage 3: Original WMMA computation.
         #pragma unroll
         for (int k = 0; k < K_TILE; k += WMMA_K) {
-
             #pragma unroll
             for (int j = 0; j < N_TILES; ++j) {
                 // Load B Fragments.
-                wmma::load_matrix_sync(
-                    b_frag[j],
-                    &smem.ab.sB[curr][
-                        (warpid * N_TILE + j * WMMA_N) * K_STRIDE + k
-                    ],
-                    K_STRIDE
-                );
+                wmma::load_matrix_sync(b_frag[j], &smem.ab.sB[curr][(warpid * N_TILE + j * WMMA_N) * K_STRIDE + k], K_STRIDE);
             }
 
             #pragma unroll
             for (int i = 0; i < M_TILES; ++i) {
                 // Load A Fragments.
-                wmma::load_matrix_sync(
-                    a_frag[i],
-                    &smem.ab.sA[curr][
-                        i * WMMA_M * K_STRIDE + k
-                    ],
-                    K_STRIDE
-                );
+                wmma::load_matrix_sync(a_frag[i], &smem.ab.sA[curr][i * WMMA_M * K_STRIDE + k], K_STRIDE);
             }
 
             // Tensor Core MMA.
@@ -728,20 +662,13 @@ __global__ void lm_head_gemm_tcore(
             for (int i = 0; i < M_TILES; ++i) {
                 #pragma unroll
                 for (int j = 0; j < N_TILES; ++j) {
-                    wmma::mma_sync(
-                        c_frag[i][j],
-                        a_frag[i],
-                        b_frag[j],
-                        c_frag[i][j]
-                    );
+                    wmma::mma_sync(c_frag[i][j], a_frag[i], b_frag[j], c_frag[i][j]);
                 }
             }
         }
 
         // All consumers must finish reading CURRENT SMEM before stage reuse.
-        if (iter + 1 < num_iters) {
-            __syncthreads();
-        }
+        if (iter + 1 < num_iters) __syncthreads();
     }
     __syncthreads();
 
@@ -750,12 +677,7 @@ __global__ void lm_head_gemm_tcore(
     for (int i = 0; i < M_TILES; ++i) {
         #pragma unroll
         for (int j = 0; j < N_TILES; ++j) {
-            wmma::store_matrix_sync(
-                &smem.sC[i][(warpid * N_TILES + j) * WMMA_M * N_STRIDE],
-                c_frag[i][j],
-                N_STRIDE,
-                wmma::mem_row_major
-            );
+            wmma::store_matrix_sync(&smem.sC[i][(warpid * N_TILES + j) * WMMA_M * N_STRIDE], c_frag[i][j], N_STRIDE, wmma::mem_row_major);
         }
     }
     __syncwarp();
@@ -774,22 +696,12 @@ __global__ void lm_head_gemm_tcore(
                 size_t n = n0 + warpid * N_TILE + tile_n * WMMA_N + _n;
 
                 if (m < M && n < N) {
-                    O[m * N + n] = __float2bfloat16_rn(
-                        smem.sC[tile_m][
-                            (warpid * N_TILES + tile_n) * WMMA_M * N_STRIDE
-                            + _m * N_STRIDE + _n
-                        ]
-                    );
+                    O[m * N + n] = __float2bfloat16_rn(smem.sC[tile_m][(warpid * N_TILES + tile_n) * WMMA_M * N_STRIDE + _m * N_STRIDE + _n]);
                 }
             }
         }
     }
-}
-
-
-
-
-
+}*/
 
 
 
@@ -802,43 +714,19 @@ void launch_lm_head_gemm_tcore_tma(
     size_t vocab_size,
     __nv_bfloat16* O
 ) {
-    if (M % M_TILE != 0 ||
-        hidden_size % K_TILE != 0 ||
-        vocab_size % (LM_HEAD_NUM_WARPS * N_TILE) != 0) {
+    if (M % M_TILE != 0 || hidden_size % K_TILE != 0 || vocab_size % (LM_HEAD_NUM_WARPS * N_TILE) != 0) {
         throw std::runtime_error("TMA requires full tiles without OOB");
     }
 
     // Create A/B Tensor Maps.
-    CUtensorMap tensor_map_A{};
-    CUtensorMap tensor_map_B{};
-
-    encode_tma_2d_bf16(
-        tensor_map_A, X,
-        M, hidden_size,
-        M_TILE, K_TILE
-    );
-
-    encode_tma_2d_bf16(
-        tensor_map_B, weight,
-        vocab_size, hidden_size,
-        LM_HEAD_NUM_WARPS * N_TILE, K_TILE
-    );
+    CUtensorMap tensor_map_A{}, tensor_map_B{};
+    encode_tma_2d_bf16(tensor_map_A, X, M, hidden_size, M_TILE, K_TILE);
+    encode_tma_2d_bf16(tensor_map_B, weight, vocab_size, hidden_size, LM_HEAD_NUM_WARPS * N_TILE, K_TILE);
 
     const dim3 block_dim(LM_HEAD_THREADS);
-    const dim3 grid_dim(
-        M / M_TILE,
-        vocab_size / (LM_HEAD_NUM_WARPS * N_TILE)
-    );
-
+    const dim3 grid_dim(M / M_TILE, vocab_size / (LM_HEAD_NUM_WARPS * N_TILE));
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-    lm_head_gemm_tcore<M_TILE, K_TILE, N_TILE, PP_STAGE>
-        <<<grid_dim, block_dim, 0, stream>>>(
-            tensor_map_A,
-            tensor_map_B,
-            M, hidden_size, vocab_size, O
-        );
-
+    lm_head_gemm_tcore_tma<M_TILE, K_TILE, N_TILE, PP_STAGE><<<grid_dim, block_dim, 0, stream>>>(tensor_map_A, tensor_map_B, M, hidden_size, vocab_size, O);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -906,7 +794,7 @@ extern "C" void lm_head_forward_cuda(
             x, w, M, hidden_size, vocab_size, o
         );
     }
-    else if (M <= 6) {
+    else if (M <= 8) {
         launch_lm_head_gemm_ccore_typed<__nv_bfloat16, 8, 8>(
             x, w, M, hidden_size, vocab_size, o
         );
@@ -917,7 +805,7 @@ extern "C" void lm_head_forward_cuda(
         );
     }
     else{ 
-        launch_lm_head_gemm_tcore_tma<32, 64, 16, 2>(
+        launch_lm_head_gemm_tcore<32, 64, 16, 2>(
             x, w, M, hidden_size, vocab_size, o
         );
     }

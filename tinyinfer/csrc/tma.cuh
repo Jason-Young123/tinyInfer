@@ -4,9 +4,10 @@
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
-#include <cuda/barrier>
 #include <cuda/ptx>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 
 // Get cuTensorMapEncodeTiled driver API.
@@ -82,8 +83,8 @@ inline void encode_tma_2d_bf16(
 }
 
 
-// TMA barrier.
-using TmaBarrier = cuda::barrier<cuda::thread_scope_block>;
+// TMA barrier: native shared-memory mbarrier storage.
+using TmaBarrier = uint64_t;
 
 
 // Select one thread from CTA.
@@ -98,18 +99,10 @@ __device__ __forceinline__ void tma_load_2d(
     const CUtensorMap* tensor_map,
     int32_t coord0,
     int32_t coord1,
-    TmaBarrier& barrier
+    TmaBarrier* barrier
 ) {
     int32_t coords[2] = {coord0, coord1};
-
-    cuda::ptx::cp_async_bulk_tensor(
-        cuda::ptx::space_shared,
-        cuda::ptx::space_global,
-        smem_dst,
-        tensor_map,
-        coords,
-        cuda::device::barrier_native_handle(barrier)
-    );
+    cuda::ptx::cp_async_bulk_tensor(cuda::ptx::space_shared, cuda::ptx::space_global, smem_dst, tensor_map, coords, barrier);
 }
 
 
@@ -123,29 +116,18 @@ __device__ __forceinline__ void tma_load_2d_pair(
     const CUtensorMap* tensor_map_B,
     int32_t b_x,
     int32_t b_y,
-    TmaBarrier& barrier,
+    TmaBarrier* barrier,
     uint32_t tx_bytes
 ) {
     if (tma_is_elected()) {
-        // Issue two asynchronous TMA loads.
         tma_load_2d(smem_A, tensor_map_A, a_x, a_y, barrier);
         tma_load_2d(smem_B, tensor_map_B, b_x, b_y, barrier);
-
-        // Register expected transaction bytes.
-        (void)cuda::device::barrier_arrive_tx(barrier, 1, tx_bytes);
+        (void)cuda::ptx::mbarrier_arrive_expect_tx(cuda::ptx::sem_release, cuda::ptx::scope_cta, cuda::ptx::space_shared, barrier, tx_bytes);
     }
 }
 
 
 // Wait until the specified TMA barrier phase is complete.
-__device__ __forceinline__ void tma_wait(
-    TmaBarrier& barrier,
-    uint32_t phase
-) {
-    while (!cuda::ptx::mbarrier_try_wait_parity(
-        cuda::ptx::sem_acquire,
-        cuda::ptx::scope_cta,
-        cuda::device::barrier_native_handle(barrier),
-        phase
-    )) {}
+__device__ __forceinline__ void tma_wait(TmaBarrier* barrier, uint32_t phase) {
+    while (!cuda::ptx::mbarrier_try_wait_parity(barrier, phase)) {}
 }

@@ -882,6 +882,100 @@ torch::Tensor lm_head_forward(
 
 
 
+/************************ defined in: lm_head_mxfp4.cu ************************/
+extern "C" void lm_head_forward_mxfp4_cuda(
+    const void* X,              // [M, hidden_size]
+    const void* weight,         // [vocab_size, hidden_size / 2]
+    const void* weight_scale,   // [vocab_size, hidden_size / 32]
+    size_t M,
+    size_t hidden_size,
+    size_t vocab_size,
+    void* O,                    // [M, vocab_size]
+    int dtype_code
+);
+
+
+torch::Tensor lm_head_forward_mxfp4(
+    torch::Tensor X,             // [M, hidden_size]
+    torch::Tensor weight,        // [vocab_size, hidden_size / 2]
+    torch::Tensor weight_scale  // [vocab_size, hidden_size / 32]
+) {
+    // ---------------- CUDA checks ----------------
+    TORCH_CHECK(X.is_cuda(), "X must be a CUDA tensor");
+    TORCH_CHECK(weight.is_cuda(), "weight must be a CUDA tensor");
+    TORCH_CHECK(weight_scale.is_cuda(), "weight_scale must be a CUDA tensor");
+
+    // ---------------- Device checks ----------------
+    TORCH_CHECK(X.device() == weight.device(), "X/weight device mismatch");
+    TORCH_CHECK(X.device() == weight_scale.device(), "X/weight_scale device mismatch");
+
+    // ---------------- Shape checks ----------------
+    TORCH_CHECK(X.dim() == 2, "X must be [M, hidden_size]");
+    TORCH_CHECK(weight.dim() == 2, "weight must be [vocab_size, hidden_size / 2]");
+    TORCH_CHECK(weight_scale.dim() == 2, "weight_scale must be [vocab_size, hidden_size / 32]");
+
+    const int64_t M = X.size(0);
+    const int64_t hidden_size = X.size(1);
+    const int64_t vocab_size = weight.size(0);
+
+    TORCH_CHECK(M > 0, "M must be positive");
+    TORCH_CHECK(hidden_size > 0, "hidden_size must be positive");
+    TORCH_CHECK(vocab_size > 0, "vocab_size must be positive");
+    TORCH_CHECK(hidden_size % 32 == 0, "hidden_size must be divisible by 32");
+    TORCH_CHECK(weight.size(1) == hidden_size / 2, "weight shape mismatch");
+    TORCH_CHECK(weight_scale.size(0) == vocab_size, "weight_scale vocab_size mismatch");
+    TORCH_CHECK(weight_scale.size(1) == hidden_size / 32, "weight_scale shape mismatch");
+
+    // ---------------- Batch size warning ----------------
+    if (M > 32) {
+        TORCH_WARN_ONCE("MXFP4 LM Head: M = ", M, " is relatively large, which may result in poor performance.");
+    }
+    TORCH_CHECK(M <= 65535, "M exceeds the supported gridDim.y limit (65535)");
+
+    // ---------------- Dtype checks ----------------
+    TORCH_CHECK(weight.scalar_type() == at::kByte, "weight must be uint8");
+    TORCH_CHECK(weight_scale.scalar_type() == at::kByte, "weight_scale must be uint8");
+
+    int dtype_code = -1;
+    if (X.scalar_type() == at::kHalf) {
+        dtype_code = 0;
+    }
+    else if (X.scalar_type() == at::kBFloat16) {
+        dtype_code = 1;
+    }
+    else {
+        TORCH_CHECK(false, "MXFP4 LM Head only supports FP16 and BF16");
+    }
+
+    // ---------------- Contiguous checks ----------------
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    TORCH_CHECK(weight.is_contiguous(), "weight must be contiguous");
+    TORCH_CHECK(weight_scale.is_contiguous(), "weight_scale must be contiguous");
+
+    c10::cuda::CUDAGuard device_guard(X.device());
+
+    auto O = torch::empty({M, vocab_size}, X.options());
+
+    lm_head_forward_mxfp4_cuda(
+        X.data_ptr(),
+        weight.data_ptr<uint8_t>(),
+        weight_scale.data_ptr<uint8_t>(),
+        static_cast<size_t>(M),
+        static_cast<size_t>(hidden_size),
+        static_cast<size_t>(vocab_size),
+        O.data_ptr(),
+        dtype_code
+    );
+
+    return O;
+}
+
+
+
+
+
+
+
 // 进行python函数注册
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
@@ -973,6 +1067,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "LM Head Forward",
         pybind11::arg("X"),
         pybind11::arg("weight")
+    );
+
+    m.def(
+        "lm_head_forward_mxfp4",
+        &lm_head_forward_mxfp4,
+        "MXFP4 LM Head Forward",
+        pybind11::arg("X"),
+        pybind11::arg("weight"),
+        pybind11::arg("weight_scale")
     );
 }
 

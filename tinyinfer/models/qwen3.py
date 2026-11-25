@@ -3,13 +3,9 @@ from torch import nn
 
 from tinyinfer.layers.activation import SiluAndMul
 from tinyinfer.layers.attention import Attention
-from tinyinfer.layers.embed_head import LMHead, VocabEmbedding
+from tinyinfer.layers.embed_head import LMHeadBase, LMHeadMXFP4, VocabEmbedding
 from tinyinfer.layers.layernorm import RMSNorm
-from tinyinfer.layers.linear import (
-    LinearBase,
-    LinearMXFP4,
-    QKVParallelLinear,
-)
+from tinyinfer.layers.linear import LinearBase, LinearMXFP4, QKVParallelLinear
 from tinyinfer.layers.rotary_embedding import RotaryEmbedding
 from tinyinfer.utils.profiler import TimeProfiler
 from tinyinfer.utils.extension import load_extension
@@ -265,10 +261,17 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = Qwen3Model(config, kv_cache, backend, quantization)
+
+        if quantization == "mxfp4":
+            LMHead = LMHeadMXFP4
+        else:
+            LMHead = LMHeadBase
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         
-        # 若 checkpoint 使用 tied embeddings(即weight tying, 权重绑定), 让两个 module 共享同一个 Parameter
+        # Weight tying: 仅适用于浮点 LM Head
         if bool(getattr(config, "tie_word_embeddings", False)):
+            if quantization == "mxfp4":
+                raise RuntimeError("MXFP4 LM Head cannot share weights with Embedding")
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def set_kv_cache(self, kv_cache) -> None:
