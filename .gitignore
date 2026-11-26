@@ -16,6 +16,13 @@ dist/
 # Compiled shared libraries
 *.so
 
+# Temporary files
+*.ptx
+*.sass
+*.cubin
+*.ncu-rep
+*.csv
+
 # Others
 useless/
 experiment/

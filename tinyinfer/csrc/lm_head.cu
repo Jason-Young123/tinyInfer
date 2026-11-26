@@ -794,7 +794,7 @@ extern "C" void lm_head_forward_cuda(
             x, w, M, hidden_size, vocab_size, o
         );
     }
-    else if (M <= 8) {
+    else if (M <= 6) {
         launch_lm_head_gemm_ccore_typed<__nv_bfloat16, 8, 8>(
             x, w, M, hidden_size, vocab_size, o
         );
